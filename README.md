@@ -31,7 +31,7 @@ Suppose Hermes updates a document and tells you it is done. Did it open the save
 It is useful when you trust Hermes to work independently but want closer checks around file changes, messages, research, and other tasks where a confident mistake would matter.
 
 > [!IMPORTANT]
-> Reviews are advice. Installing this plugin does not automatically stop dangerous commands or replace your approval settings. Automatic reviews are off by default; begin by asking for specific checks.
+> The explicit `jev_live` tool makes bounded enforcement decisions. It never executes an action, and deterministic policy plus Hermes approval remains authoritative. Automatic live gating is off until you enable it.
 
 ## What you can ask it to check
 
@@ -127,7 +127,7 @@ hermes plugins doctor jev-decisions
 
 These commands target the default Hermes profile and enable the tools for the CLI. If you use a named profile or a messaging platform, use that profile's plugin directory and tool settings. If the plugin is already installed, follow [the update instructions](#update-or-disable) instead of cloning over it.
 
-The doctor should report successful discovery and registration of eight tools and three hooks. Hooks are the optional automatic checks; registering them does not switch them on.
+The doctor should report successful discovery and registration of nine tools and three hooks. Hooks are the optional automatic checks; registering them does not switch them on.
 
 **For Jev model reviews, choose a provider with `JEV_PROVIDER_MODE`**: `typesafe`, `openrouter`, `typesafe_then_openrouter`, `openrouter_then_typesafe`, `laya`, or an opt in chain that starts at the local server and falls through to a hosted provider: `laya_then_typesafe`, `laya_then_openrouter`, `laya_then_typesafe_openrouter`, or `laya_then_openrouter_typesafe`. The DOGA names `laya_local` and `laya_with_jev_fallback` are accepted aliases for `laya` and `laya_then_openrouter_typesafe`. The default remains `openrouter`. It runs Jev over a TypeSafe or OpenRouter key, or over Laya locally with no key. The plugin reads `TYPESAFE_API_KEY` for direct TypeSafe access and `OPENROUTER_API_KEY` for OpenRouter access from the active Hermes secret scope. Do not paste a key into chat or save it in this repository. The direct route uses `https://api.typesafe.ai/v1/systemone` and model `jev-1.13.0`; the OpenRouter route uses `https://openrouter.ai/api/alpha/decisions` and model `typesafe/jev-1.13`. A `laya_then_*` mode needs the key of every hosted provider it names and fails at selection, naming the missing variable, when one is absent.
 
@@ -166,6 +166,25 @@ Hermes chooses and calls the tools. If it answers without using them, ask it to 
 Version 0.2.1 adds selectable TypeSafe and OpenRouter routing to model reviews. Use a single provider or make either provider the primary route with the other as fallback. The companion approval only provider remains OpenRouter only in this release. It refuses ordinary chat, never executes commands, and escalates on missing or malformed evidence. Hermes's existing approval policy remains authoritative.
 
 Installation does not select the provider, change `approvals.mode`, or enable native smart approvals. Configure it separately only after reviewing the [approval guide](docs/approvals.md). LCM, context handling, ordinary model routing, and existing tools are unchanged.
+
+## Live enforcement
+
+Version 0.7.0 adds the `jev_live` tool for decisions that change what happens next. It has four bounded actions:
+
+- `authorize_action` returns `allow`, `ask`, or `deny` for a prospective state changing tool call.
+- `gate_memory` returns `retain`, `hold`, or `discard` before a candidate is written to durable memory.
+- `triage_anomaly` returns `ignore`, `inspect`, `escalate`, or `hold` for an operational anomaly.
+- `verify_action` requires explicit `changed`, `read_back`, and `evidence` proof after an action.
+
+These are live dispositions, not telemetry. The plugin records a hashed receipt locally, and the host workflow must obey the returned disposition. Jev cannot approve destructive or credential related work by itself because the deterministic gateway can still require a human.
+
+For automatic gating of prospective mutating tool calls, enable the hooks and live enforcement together:
+
+```bash
+JEV_ENABLE_HOOKS=1 JEV_LIVE_ENFORCEMENT=1 hermes
+```
+
+Read only calls bypass the provider. Mutating calls are held when Jev is unavailable, uncertain, or denied. This is intentionally fail closed and can add provider latency. Use `jev_live` directly when a workflow needs memory or anomaly decisions.
 
 ## Optional automatic reviews
 

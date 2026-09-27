@@ -52,6 +52,10 @@ try:
     from . import lessons as _lessons
 except ImportError:
     import lessons as _lessons
+try:
+    from . import live_enforcement as _live
+except ImportError:
+    import live_enforcement as _live
 _TOOLSET = "jev"
 _ENDPOINT = "https://openrouter.ai/api/alpha/decisions"
 _MODEL = "typesafe/jev-1.13"
@@ -330,6 +334,58 @@ _WORKFLOW_QUESTIONS = {
     },
 }
 
+JEV_LIVE_SCHEMA = {
+    "name": "jev_live",
+    "description": "Enforce bounded live decisions for action authorization, memory retention, anomaly triage, and post-action verification. This tool returns a disposition and never executes the action.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["authorize_action", "gate_memory", "triage_anomaly", "verify_action"]},
+            "state": {"type": "object", "description": "Small, redacted state for the selected live policy."},
+        },
+        "required": ["action", "state"],
+        "additionalProperties": False,
+    },
+}
+
+
+def _live_evaluate(workflow: str, state: dict[str, Any]) -> dict[str, Any]:
+    question_map = {
+        "authorize_action": _live.ACTION_QUESTIONS,
+        "gate_memory": _live.MEMORY_QUESTIONS,
+        "triage_anomaly": _live.ANOMALY_QUESTIONS,
+    }
+    result = _request(
+        {"model": _MODEL, "state": state, "questions": question_map[workflow]},
+        _secret(),
+    )
+    answers = result.get("answers")
+    if not isinstance(answers, dict):
+        raise RuntimeError("Jev live policy returned no answers")
+    return answers
+
+
+def jev_live_handler(args: dict[str, Any], **_: Any) -> str:
+    action = args.get("action")
+    state = args.get("state")
+    if action not in {"authorize_action", "gate_memory", "triage_anomaly", "verify_action"}:
+        return json.dumps({"error": "unknown live action"})
+    if not isinstance(state, dict):
+        return json.dumps({"error": "state must be an object"})
+    try:
+        if action == "authorize_action":
+            result = _live.authorize_action(state, lambda workflow, payload: _live_evaluate(workflow, payload))
+        elif action == "gate_memory":
+            result = _live.gate_memory(state, lambda workflow, payload: _live_evaluate(workflow, payload))
+        elif action == "triage_anomaly":
+            result = _live.triage_anomaly(state, lambda workflow, payload: _live_evaluate(workflow, payload))
+        else:
+            result = _live.verify_action(state)
+        return json.dumps({"success": True, "live": True, "action": action, **result}, sort_keys=True, default=str)
+    except Exception as exc:
+        return json.dumps({"error": str(exc), "live": True, "action": action})
+
+
 JEV_INGEST_SCHEMA = {
     "name": "jev_ingest",
     "description": "Route an event from Hermes or a connected system into a tracked Jev case.",
@@ -385,7 +441,7 @@ JEV_LEDGER_SCHEMA = {
 
 _WORKFLOW_SCHEMA = {
     "name": "jev_workflow",
-    "description": "Run a predefined Jev shadow evaluation for goal judging, memory gating, command review, recall reranking, or post-action verification. It recommends only and never authorizes, writes, deletes, or routes by itself.",
+    "description": "Run a predefined Jev review. For enforced action, memory, anomaly, or verification decisions use jev_live.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -645,6 +701,22 @@ def _on_pre_tool_call(
         return None
     if not tool_name:
         return None
+    if os.environ.get("JEV_LIVE_ENFORCEMENT", "").strip().lower() in {"1", "true", "yes", "on"} and not _supervision.is_read_only_call(tool_name, args):
+        try:
+            action_text = f"{tool_name} {_safe_text(args, 600)}".lower()
+            state = {
+                "tool_name": tool_name,
+                "arguments_sha256": hashlib.sha256(_safe_text(args, 6000).encode()).hexdigest(),
+                "external": True,
+                "reversible": True,
+                "destructive": any(token in action_text for token in ("delete", "destroy", "wipe", "drop", "publish", "send", "deploy")),
+                "credential": any(token in action_text for token in ("password", "secret", "token", "api_key", "credential")),
+            }
+            live = _live.authorize_action(state, lambda workflow, payload: _live_evaluate(workflow, payload))
+            if live["decision"] != "allow":
+                return {"action": "block", "message": f"Jev live enforcement returned {live['decision']}: {live['reason']}"}
+        except Exception as exc:
+            return {"action": "block", "message": f"Jev live enforcement is unavailable: {type(exc).__name__}. Action held for review."}
     # A known mistake first: a lesson carries the specific rule, so it is checked
     # before the generic repeated-failure control. Both are local and free.
     directive = _lesson_gate(tool_name, args, _supervision.default_supervision().enforcing())
@@ -1164,6 +1236,7 @@ def register(ctx: Any) -> None:
     ctx.register_tool("jev_ingest", _TOOLSET, JEV_INGEST_SCHEMA, jev_ingest_handler, description=JEV_INGEST_SCHEMA["description"])
     ctx.register_tool("jev_loop", _TOOLSET, JEV_LOOP_SCHEMA, jev_loop_handler, description=JEV_LOOP_SCHEMA["description"])
     ctx.register_tool("jev_supervision", _TOOLSET, JEV_SUPERVISION_SCHEMA, jev_supervision_handler, description=JEV_SUPERVISION_SCHEMA["description"])
+    ctx.register_tool("jev_live", _TOOLSET, JEV_LIVE_SCHEMA, jev_live_handler, description=JEV_LIVE_SCHEMA["description"])
     ctx.register_tool("jev_lessons", _TOOLSET, JEV_LESSONS_SCHEMA, jev_lessons_handler, description=JEV_LESSONS_SCHEMA["description"])
     ctx.register_hook("post_llm_call", _on_post_llm_call)
     ctx.register_hook("post_tool_call", _on_post_tool_call)

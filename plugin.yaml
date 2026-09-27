@@ -1,6 +1,6 @@
 name: jev-decisions
-version: "0.6.1"
-description: "Jev Decisions Plugin for Hermes: action reviews, local policy, evidence checks, optional smart approval review, local decision supervision, and learned corrections"
+version: "0.7.0"
+description: "Jev Decisions Plugin for Hermes: live action authorization, memory gates, anomaly triage, verification, local policy, supervision, and learned corrections"
 author: "Bojan Sandhaus"
 license: MIT
 homepage: "https://github.com/bojansandhaus/jev-decisions"
@@ -14,6 +14,7 @@ provides_tools:
   - jev_ingest
   - jev_loop
   - jev_supervision
+  - jev_live
   - jev_lessons
 provides_hooks:
   - post_llm_call

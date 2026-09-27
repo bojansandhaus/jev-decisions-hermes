@@ -354,14 +354,14 @@ def test_register_declares_the_lessons_tool(plugin):
     plugin.register(Context())
     assert registered["jev_lessons"] == "jev"
     assert sum(1 for key in registered if key.startswith("hook:")) == 3
-    assert len([k for k in registered if not k.startswith("hook:")]) == 8
+    assert len([k for k in registered if not k.startswith("hook:")]) == 9
 
 
-def test_plugin_yaml_declares_eight_tools():
+def test_plugin_yaml_declares_nine_tools():
     manifest = (ROOT / "plugin.yaml").read_text()
     for tool in (
         "jev_decide", "jev_workflow", "jev_ledger", "jev_gateway",
-        "jev_ingest", "jev_loop", "jev_supervision", "jev_lessons",
+        "jev_ingest", "jev_loop", "jev_supervision", "jev_live", "jev_lessons",
     ):
         assert tool in manifest, f"{tool} missing from plugin.yaml"
     assert manifest.count("- pre_tool_call") == 1, "only one pre_tool_call owner is allowed"
