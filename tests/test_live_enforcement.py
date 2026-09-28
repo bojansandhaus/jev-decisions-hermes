@@ -127,5 +127,90 @@ def test_live_hook_blocks_mutating_call_when_jev_is_uncertain(monkeypatch, tmp_p
     uncertain["verdict"] = {"choice": "ESCALATE", "confidence": 0.9}
     monkeypatch.setattr(module, "_request", lambda *args, **kwargs: {"answers": uncertain})
     directive = module._on_pre_tool_call("terminal", {"command": "write production file"}, session_id="live")
-    assert directive["action"] == "block"
-    assert "ask" in directive["message"]
+    assert directive["action"] == "approve"
+    assert "human approval" in directive["message"]
+
+
+def test_live_hook_exposes_bounded_action_descriptor_without_raw_arguments(monkeypatch, tmp_path):
+    import ledger
+    monkeypatch.setattr(ledger, "get_hermes_home", lambda: str(tmp_path))
+    spec = importlib.util.spec_from_file_location("jev_live_descriptor_test", ROOT / "__init__.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setenv("JEV_ENABLE_HOOKS", "1")
+    monkeypatch.setenv("JEV_LIVE_ENFORCEMENT", "1")
+    monkeypatch.setattr(module, "_secret", lambda: "synthetic")
+    captured = {}
+
+    def evaluate(workflow, state):
+        captured.update(state)
+        return approved_answers()
+
+    monkeypatch.setattr(module, "_live_evaluate", evaluate)
+    module._on_pre_tool_call(
+        "terminal",
+        {"command": "curl https://example.invalid/private"},
+        session_id="live",
+    )
+    assert "arguments_sha256" in captured
+    assert "curl" in captured["action_descriptor"]
+    assert "example.invalid" not in captured["action_descriptor"]
+    assert "private" not in captured["action_descriptor"]
+
+
+def test_live_hook_routes_ask_to_human_approval(monkeypatch, tmp_path):
+    import ledger
+    monkeypatch.setattr(ledger, "get_hermes_home", lambda: str(tmp_path))
+    spec = importlib.util.spec_from_file_location("jev_live_ask_test", ROOT / "__init__.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setenv("JEV_ENABLE_HOOKS", "1")
+    monkeypatch.setenv("JEV_LIVE_ENFORCEMENT", "1")
+    monkeypatch.setattr(module, "_secret", lambda: "synthetic")
+    answers = approved_answers()
+    answers["verdict"] = {"choice": "ESCALATE", "confidence": 0.9}
+    monkeypatch.setattr(module, "_request", lambda *args, **kwargs: {"answers": answers})
+    directive = module._on_pre_tool_call("terminal", {"command": "make deploy"}, session_id="live")
+    assert directive["action"] == "approve"
+
+
+def test_live_handler_rejects_invalid_memory_answer(monkeypatch, tmp_path):
+    import ledger
+    monkeypatch.setattr(ledger, "get_hermes_home", lambda: str(tmp_path))
+    spec = importlib.util.spec_from_file_location("jev_live_invalid_test", ROOT / "__init__.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    request_options = {}
+    monkeypatch.setattr(module, "_secret", lambda: "synthetic")
+    monkeypatch.setattr(module, "_request", lambda *args, **kwargs: request_options.update(kwargs) or {"answers": {
+        "retain": {"noul": float("nan")},
+        "kind": {"choice": "fact"},
+        "sensitive": {"noul": 0.01},
+        "conflict": {"noul": 0.01},
+    }})
+    result = json.loads(module.jev_live_handler({
+        "action": "gate_memory", "state": {"candidate": "private fact"},
+    }))
+    assert result["error"]
+    assert result["live"] is True
+    assert request_options == {"timeout_s": 8.0, "max_attempts": 1}
+
+
+def test_live_enforcement_disables_legacy_shadow_provider_by_default(monkeypatch, tmp_path):
+    import ledger
+    monkeypatch.setattr(ledger, "get_hermes_home", lambda: str(tmp_path))
+    spec = importlib.util.spec_from_file_location("jev_live_shadow_test", ROOT / "__init__.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setenv("JEV_ENABLE_HOOKS", "1")
+    monkeypatch.setenv("JEV_LIVE_ENFORCEMENT", "1")
+    calls = []
+    monkeypatch.setattr(module, "_request", lambda *args, **kwargs: calls.append(args) or {"answers": approved_answers()})
+    monkeypatch.setattr(module, "_live_evaluate", lambda workflow, state: approved_answers())
+    module._on_pre_tool_call("write_file", {"path": "notes.txt", "content": "hello"}, session_id="live")
+    module._on_post_tool_call("write_file", {"path": "notes.txt"}, "saved", session_id="live")
+    assert calls == []

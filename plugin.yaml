@@ -1,5 +1,5 @@
 name: jev-decisions
-version: "0.7.0"
+version: "0.7.1"
 description: "Jev Decisions Plugin for Hermes: live action authorization, memory gates, anomaly triage, verification, local policy, supervision, and learned corrections"
 author: "Bojan Sandhaus"
 license: MIT

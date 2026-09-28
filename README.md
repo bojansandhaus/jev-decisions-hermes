@@ -169,10 +169,10 @@ Installation does not select the provider, change `approvals.mode`, or enable na
 
 ## Live enforcement
 
-Version 0.7.0 adds the `jev_live` tool for decisions that change what happens next. It has four bounded actions:
+Version 0.7.1 hardens the `jev_live` tool introduced in 0.7.0. It has four bounded actions:
 
 - `authorize_action` returns `allow`, `ask`, or `deny` for a prospective state changing tool call.
-- `gate_memory` returns `retain`, `hold`, or `discard` before a candidate is written to durable memory.
+- `gate_memory` returns `retain`, `hold`, or `discard` for an explicit memory candidate. It is not an automatic interceptor of Hermes durable memory writes.
 - `triage_anomaly` returns `ignore`, `inspect`, `escalate`, or `hold` for an operational anomaly.
 - `verify_action` requires explicit `changed`, `read_back`, and `evidence` proof after an action.
 
@@ -184,7 +184,7 @@ For automatic gating of prospective mutating tool calls, enable the hooks and li
 JEV_ENABLE_HOOKS=1 JEV_LIVE_ENFORCEMENT=1 hermes
 ```
 
-Read only calls bypass the provider. Mutating calls are held when Jev is unavailable, uncertain, or denied. This is intentionally fail closed and can add provider latency. Use `jev_live` directly when a workflow needs memory or anomaly decisions.
+Read only calls bypass the provider only through a conservative allowlist. Mutating calls are held when Jev is unavailable, uncertain, or denied. This is intentionally fail closed and can add provider latency. Live enforcement disables the legacy shadow provider observers by default; set `JEV_SHADOW_OBSERVERS=1` only when you explicitly want both paths. Use `jev_live` directly when a workflow needs memory or anomaly decisions.
 
 ## Optional automatic reviews
 

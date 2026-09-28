@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from typing import Any, Callable
 
 try:
@@ -57,6 +58,55 @@ def _receipt(kind: str, state: dict[str, Any], result: dict[str, Any]) -> str:
     })
 
 
+def _finite_probability(value: Any, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        raise ValueError(f"{name} must be a finite probability")
+    value = float(value)
+    if not 0.0 <= value <= 1.0:
+        raise ValueError(f"{name} must be in [0, 1]")
+    return value
+
+
+def validate_answers(answers: Any, questions: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Validate one live answer map before any policy comparison.
+
+    Live policies accept only a bounded typed response: every declared answer
+    is required, unknown answer IDs are rejected, and values stay on the scale
+    declared by the question.
+    """
+    if not isinstance(answers, dict) or set(answers) != set(questions):
+        raise ValueError("live policy returned an incomplete or unexpected answer set")
+    for name, question in questions.items():
+        answer = answers.get(name)
+        if not isinstance(answer, dict):
+            raise ValueError(f"answer {name} must be an object")
+        kind = question.get("type")
+        if kind not in {"noul", "choice", "score"}:
+            raise ValueError(f"question {name} has an unsupported type")
+        value_key = {"noul": "noul", "choice": "choice", "score": "score"}[kind]
+        if set(answer) - {value_key, "confidence"}:
+            raise ValueError(f"answer {name} has unexpected fields")
+        if kind == "noul":
+            _finite_probability(answer.get("noul"), name)
+        elif kind == "choice":
+            choice = answer.get("choice")
+            criteria = question.get("criteria")
+            if not isinstance(choice, str) or not isinstance(criteria, dict) or choice not in criteria:
+                raise ValueError(f"answer {name} has an unknown choice")
+        elif kind == "score":
+            score = answer.get("score")
+            if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(float(score)):
+                raise ValueError(f"answer {name} must be a finite score")
+            criteria = question.get("criteria")
+            if isinstance(criteria, list) and not 0 <= float(score) <= len(criteria) - 1:
+                raise ValueError(f"answer {name} is outside its declared score scale")
+        else:
+            raise ValueError(f"question {name} has an unsupported type")
+        if "confidence" in answer:
+            _finite_probability(answer["confidence"], f"{name}.confidence")
+    return answers
+
+
 def authorize_action(state: dict[str, Any], evaluate: Evaluator) -> dict[str, Any]:
     """Return allow, ask, or deny for one prospective state changing action."""
     if not isinstance(state, dict) or not str(state.get("tool_name") or "").strip():
@@ -66,6 +116,7 @@ def authorize_action(state: dict[str, Any], evaluate: Evaluator) -> dict[str, An
         result = {"decision": "ask", "reason": "deterministic policy requires human authority", "authority": "deterministic_policy"}
     else:
         answers = evaluate("authorize_action", state)
+        validate_answers(answers, ACTION_QUESTIONS)
         policy = apply_policy(answers, has_policy=bool(state.get("operator_policy")))
         if policy.verdict == "APPROVE" and local["decision"] != "human":
             result = {"decision": "allow", "reason": policy.rule, "authority": "jev_plus_deterministic_policy"}
@@ -82,6 +133,7 @@ def gate_memory(state: dict[str, Any], evaluate: Evaluator) -> dict[str, Any]:
     if not isinstance(state, dict) or not str(state.get("candidate") or "").strip():
         raise ValueError("gate_memory requires candidate")
     answers = evaluate("gate_memory", state)
+    validate_answers(answers, MEMORY_QUESTIONS)
     retain = answers["retain"]["noul"] >= 0.70
     sensitive = answers["sensitive"]["noul"] >= 0.70
     conflict = answers["conflict"]["noul"] >= 0.70
@@ -104,6 +156,7 @@ def triage_anomaly(state: dict[str, Any], evaluate: Evaluator) -> dict[str, Any]
     if not isinstance(state, dict) or not str(state.get("summary") or "").strip():
         raise ValueError("triage_anomaly requires summary")
     answers = evaluate("triage_anomaly", state)
+    validate_answers(answers, ANOMALY_QUESTIONS)
     anomaly = answers["anomaly"]["noul"] >= 0.70
     severity = answers["severity"]["choice"]
     if not anomaly or severity == "info":
@@ -122,5 +175,6 @@ def triage_anomaly(state: dict[str, Any], evaluate: Evaluator) -> dict[str, Any]
 def verify_action(state: dict[str, Any]) -> dict[str, Any]:
     """Require direct readback evidence after a state changing action."""
     result = gateway_verify(state)
+    result["decision"] = "verified" if result["verified"] else "unverified"
     result["receipt_id"] = _receipt("verify_action", state, result)
     return result

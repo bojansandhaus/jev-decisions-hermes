@@ -324,6 +324,9 @@ def test_mutating_or_composed_calls_are_not_bypassed(supervision):
     assert supervision.is_read_only_call("terminal", {"command": "PATH=/tmp ls"}) is False
     assert supervision.is_read_only_call("terminal", {"command": "/usr/bin/ls"}) is False
     assert supervision.is_read_only_call("terminal", {"command": "git push"}) is False
+    assert supervision.is_read_only_call("terminal", {"command": "git diff --output=/tmp/out"}) is False
+    assert supervision.is_read_only_call("terminal", {"command": "cat /etc/shadow"}) is False
+    assert supervision.is_read_only_call("jev_unknown", {}) is False
 
 
 # -- provenance ----------------------------------------------------------

@@ -48,7 +48,7 @@ The result should contain `"verified": true` and `"next": "done"`. These inputs 
 
 ## Hermes tools and hooks
 
-The plugin exposes eight tools under the `jev` toolset.
+The plugin exposes nine tools under the `jev` toolset.
 
 <table>
 <tr><th>Tool</th><th>Use it for</th><th>Provider required?</th></tr>
@@ -60,6 +60,7 @@ The plugin exposes eight tools under the `jev` toolset.
 <tr><td><code>jev_loop</code></td><td>Link decisions, observations, and outcomes; assess the resulting history.</td><td>No</td></tr>
 <tr><td><code>jev_supervision</code></td><td>Turn admission, adaptive event routing, challenge freshness, and repeated failure controls.</td><td>No</td></tr>
 <tr><td><code>jev_lessons</code></td><td>Learned corrections: severity escalation, catch and escape tallies, noise retirement, and lesson packs.</td><td>No</td></tr>
+<tr><td><code>jev_live</code></td><td>Explicit live authorization, memory, anomaly, and verification decisions with bounded typed answers.</td><td>Usually, except verification and local policy checks</td></tr>
 </table>
 
 The `approval_review` workflow is an opt in advisory check for flagged commands. It returns typed answers and a deterministic applied rule; it never authorizes execution. Configure the optional provider through [the approval guide](approvals.md).
@@ -72,7 +73,7 @@ Three optional hooks observe the agent lifecycle when `JEV_ENABLE_HOOKS` is enab
 
 Optional platform event handlers can also record event metadata for Home Assistant, email, Telegram, Discord, Matrix, and DingTalk when the host exposes the required adapter API. They do not send messages or control those services. This is an integration surface, not a guarantee that every platform version has been tested.
 
-Hooks return no approval, replacement answer, or execution instruction. They may record local review data. Model reviews can add provider requests and latency when enabled; see the configuration and privacy details in [the integration guide](integrations.md).
+Hooks return no replacement answer or execution instruction. With `JEV_LIVE_ENFORCEMENT=1`, `pre_tool_call` can return a Hermes human approval or block directive for a state changing call. Model reviews can add provider requests and latency when enabled; see the configuration and privacy details in [the integration guide](integrations.md).
 
 ## Tool actions and records
 

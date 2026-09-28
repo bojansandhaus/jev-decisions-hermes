@@ -103,6 +103,7 @@ _SAFE_GIT_SUBCOMMANDS = frozenset({
 })
 _SHELL_META_RE = re.compile(r"(?:&&|\|\||[;|><`]|\$\()")
 _WORD_RE = re.compile(r"[a-z0-9_'-]+")
+_SENSITIVE_PATH_RE = re.compile(r"(?i)(?:/etc/shadow|/etc/passwd|\.env(?:\b|$)|\.pem(?:\b|$)|\.key(?:\b|$)|password|secret|credential)")
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -189,7 +190,7 @@ def normalize_error(result: Any) -> str:
 def is_read_only_call(tool_name: str, args: Any) -> bool:
     """True only for deliberately narrow, obviously read-only calls."""
     name = str(tool_name or "").strip()
-    if name in _READ_ONLY_TOOLS or name.startswith("jev_"):
+    if name in _READ_ONLY_TOOLS:
         return True
     if name not in {"terminal", "shell", "bash", "run_command"}:
         return False
@@ -206,10 +207,14 @@ def is_read_only_call(tool_name: str, args: Any) -> bool:
     parts = command.split()
     if not parts or "=" in parts[0] or "/" in parts[0]:
         return False
+    if _SENSITIVE_PATH_RE.search(command):
+        return False
     if parts[0] in _SIMPLE_READ_ONLY_COMMANDS:
-        return True
+        return not any("=" in part or part in {"-O", "--output", "--output-file"} for part in parts[1:])
     if parts[0] == "git" and len(parts) >= 2:
-        return parts[1] in _SAFE_GIT_SUBCOMMANDS
+        if parts[1] not in _SAFE_GIT_SUBCOMMANDS:
+            return False
+        return not any("=" in part or part in {"-O", "--output", "--output-file"} for part in parts[2:])
     return False
 
 

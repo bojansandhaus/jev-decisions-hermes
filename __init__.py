@@ -71,6 +71,19 @@ def _hooks_enabled() -> bool:
     """Enable networked observer hooks only when explicitly opted in."""
     return os.environ.get("JEV_ENABLE_HOOKS", "").strip().lower() in {"1", "true", "yes", "on"}
 
+
+def _live_enforcement_enabled() -> bool:
+    return os.environ.get("JEV_LIVE_ENFORCEMENT", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _shadow_observers_enabled() -> bool:
+    """Keep legacy observers off when live enforcement is explicitly active."""
+    if not _hooks_enabled():
+        return False
+    if not _live_enforcement_enabled():
+        return True
+    return os.environ.get("JEV_SHADOW_OBSERVERS", "").strip().lower() in {"1", "true", "yes", "on"}
+
 JEV_DECIDE_SCHEMA = {
     "name": "jev_decide",
     "description": (
@@ -141,7 +154,13 @@ def _routing(result: dict[str, Any]) -> dict[str, Any]:
     return {"provider_routing": routing} if routing else {}
 
 
-def _request(payload: dict[str, Any], api_key: str) -> dict[str, Any]:
+def _request(
+    payload: dict[str, Any],
+    api_key: str,
+    *,
+    timeout_s: float = 30.0,
+    max_attempts: int = 3,
+) -> dict[str, Any]:
     """One review through the selected route. Laya needs no key and sends none."""
     mode = provider_mode()
     if mode != "openrouter":
@@ -149,7 +168,7 @@ def _request(payload: dict[str, Any], api_key: str) -> dict[str, Any]:
             payload.get("state"), payload.get("questions", {}), api_key,
             model=payload.get("model") or _MODEL,
             provider=mode, fallback_api_key=_fallback_secret(),
-            timeout=LAYA_TIMEOUT_S if uses_local_hop(mode) else 30.0,
+            timeout=min(LAYA_TIMEOUT_S if uses_local_hop(mode) else 30.0, timeout_s),
         )
     body = json.dumps(payload).encode("utf-8")
     req = Request(
@@ -164,9 +183,9 @@ def _request(payload: dict[str, Any], api_key: str) -> dict[str, Any]:
         },
     )
     last_error: Exception | None = None
-    for attempt in range(3):
+    for attempt in range(max(1, max_attempts)):
         try:
-            with urlopen(req, timeout=30) as response:
+            with urlopen(req, timeout=timeout_s) as response:
                 result = json.loads(response.read().decode("utf-8"))
             if not isinstance(result, dict) or not isinstance(result.get("answers"), dict):
                 raise _ProviderSchemaError("OpenRouter Jev response has no valid answers map")
@@ -175,14 +194,15 @@ def _request(payload: dict[str, Any], api_key: str) -> dict[str, Any]:
             raise
         except HTTPError as exc:
             last_error = exc
-            if exc.code not in (429, 500, 502, 503, 504) or attempt == 2:
+            if exc.code not in (429, 500, 502, 503, 504) or attempt == max(1, max_attempts) - 1:
                 detail = exc.read(2048).decode("utf-8", errors="replace")
                 raise RuntimeError(f"OpenRouter Jev HTTP {exc.code}: {detail}") from exc
         except (URLError, TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
             last_error = exc
-            if attempt == 2:
+            if attempt == max(1, max_attempts) - 1:
                 raise RuntimeError(f"OpenRouter Jev request failed: {exc}") from exc
-        time.sleep(2**attempt)
+        if attempt < max(1, max_attempts) - 1:
+            time.sleep(2**attempt)
     raise RuntimeError(f"OpenRouter Jev request failed: {last_error}")
 
 
@@ -358,6 +378,8 @@ def _live_evaluate(workflow: str, state: dict[str, Any]) -> dict[str, Any]:
     result = _request(
         {"model": _MODEL, "state": state, "questions": question_map[workflow]},
         _secret(),
+        timeout_s=8.0,
+        max_attempts=1,
     )
     answers = result.get("answers")
     if not isinstance(answers, dict):
@@ -559,7 +581,7 @@ def _on_post_llm_call(
     **_: Any,
 ) -> None:
     """Review final answers in shadow mode without changing or blocking them."""
-    if not _hooks_enabled():
+    if not _shadow_observers_enabled():
         return None
     turn_key = _supervise_begin(turn_id, session_id, user_message)
     admission = None
@@ -605,7 +627,80 @@ def _safe_text(value: Any, limit: int = 12000) -> str:
         return _redact_for_review(str(value), limit)
 
 
-def _on_post_tool_call(tool_name: str = "", args: Any = None, result: Any = None, invocation_id: str | None = None, turn_id: str = "", session_id: str = "", **_: Any) -> None:
+_ACTION_TOKEN_RE = re.compile(r"[A-Za-z0-9_.:+/-]+|&&|\|\||[;|><]")
+_SENSITIVE_ACTION_RE = re.compile(
+    r"(?i)(?:password|secret|api[_ -]?key|credential|private[_ -]?key|/etc/shadow|/etc/passwd|\.pem\b|\.key\b|\.env\b)"
+)
+
+
+def _action_descriptor(tool_name: str, args: Any) -> str:
+    """Describe operation shape without sending argument values to Jev."""
+    if not isinstance(args, dict):
+        return f"tool={tool_name}; args_type={type(args).__name__}"
+    command = next(
+        (value.strip() for key in ("command", "cmd", "script")
+         if isinstance(value := args.get(key), str) and value.strip()),
+        None,
+    )
+    if command:
+        tokens = _ACTION_TOKEN_RE.findall(command)[:32]
+        rendered: list[str] = []
+        segment_words = 0
+        keep_words = 2 if tokens and tokens[0] == "git" else 1
+        for token in tokens:
+            if token in {"&&", "||", ";", "|", ">", "<"}:
+                rendered.append(token)
+                segment_words = 0
+                keep_words = 1
+            elif token.startswith("-"):
+                rendered.append(token[:32])
+            elif segment_words < keep_words:
+                rendered.append("<sensitive>" if _SENSITIVE_ACTION_RE.search(token) else token[:64])
+                segment_words += 1
+            else:
+                rendered.append("<arg>")
+        return f"tool={tool_name}; command={' '.join(rendered)[:600]}"
+    fields = []
+    for key in sorted(args)[:32]:
+        value = args[key]
+        if isinstance(value, bool):
+            kind = "bool"
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            kind = "number"
+        elif isinstance(value, (dict, list, tuple)):
+            kind = "structured"
+        else:
+            kind = "text"
+        fields.append(f"{key}={kind}")
+    return f"tool={tool_name}; fields={','.join(fields)[:560]}"
+
+
+def _action_risk_flags(tool_name: str, args: Any) -> dict[str, bool]:
+    """Derive conservative local facts before asking Jev for semantics."""
+    raw = _safe_text({"tool": tool_name, "args": args}, 6000).lower()
+    tokens = set(re.findall(r"[a-z0-9_./+-]+", raw))
+    key_text = " ".join(str(key) for key in args) if isinstance(args, dict) else ""
+    sensitive = bool(_SENSITIVE_ACTION_RE.search(key_text) or _SENSITIVE_ACTION_RE.search(raw))
+    sensitive = sensitive or bool(re.search(r"(?i)(?:^|\s|=)--?(?:password|token|secret|api[-_]?key)\b", raw))
+    outbound = any(token in tokens for token in {"curl", "wget", "ssh", "scp", "nc", "send", "publish", "deploy"}) or bool(re.search(r"(?i)\bgit\s+push\b", raw))
+    destructive = bool(re.search(
+        r"(?i)(?:\brm\s+-[a-z]*r|\bdelete\b|\bdestroy\b|\bwipe\b|\btruncate\b|\bdrop\b|\bshutdown\b|\brestart\b|\bsudo\b|\bchmod\b|\bchown\b|\bdeploy\b|\bpublish\b|\bgit\s+push\b)",
+        raw,
+    ))
+    shell_pipe = bool(re.search(r"\|\s*(?:sh|bash|zsh|fish|python|python3|perl|ruby)\b", raw))
+    force_push = bool(re.search(r"\bgit\s+push\b.*(?:--force|-f)\b", raw))
+    destructive = destructive or shell_pipe or force_push
+    external = outbound or shell_pipe or bool(re.search(r"(?i)\b(?:email|telegram|discord|home_assistant)\b", raw))
+    irreversible = destructive or sensitive or (external and bool(re.search(r"(?i)\b(?:send|publish|deploy|shutdown|restart)\b", raw)))
+    return {
+        "external": external,
+        "reversible": not irreversible,
+        "destructive": destructive,
+        "credential": sensitive,
+    }
+
+
+def _on_post_tool_call(tool_name: str = "", args: Any = None, result: Any = None, invocation_id: str | None = None, tool_call_id: str | None = None, turn_id: str = "", session_id: str = "", **_: Any) -> None:
     """Verify tool results in shadow mode without affecting tool execution."""
     if not _hooks_enabled():
         return None
@@ -625,6 +720,7 @@ def _on_post_tool_call(tool_name: str = "", args: Any = None, result: Any = None
         outcome = _supervision.default_supervision().record_tool_outcome(
             tool_name=tool_name, args=args, result=result, turn_id=turn_key,
         )
+    invocation_id = invocation_id or tool_call_id
     result_metadata = {
         "result_sha256": hashlib.sha256(result_text.encode("utf-8")).hexdigest(),
         "result_chars": len(result_text),
@@ -637,6 +733,8 @@ def _on_post_tool_call(tool_name: str = "", args: Any = None, result: Any = None
             loop_record_outcome(case_id, "verified" if verification["verified"] else "awaiting_verification", True if verification["verified"] else None, result_metadata, verification["next"])
         except Exception:
             pass
+    if not _shadow_observers_enabled():
+        return None
     state = {
         "tool_name": tool_name,
         "arguments": _safe_text(args, 5000),
@@ -684,35 +782,36 @@ def _on_pre_tool_call(
     tool_name: str = "",
     args: Any = None,
     invocation_id: str | None = None,
+    tool_call_id: str | None = None,
     turn_id: str = "",
     session_id: str = "",
     **_: Any,
 ) -> Any:
     """Classify prospective tool risk before execution.
 
-    The local control lease is consulted first, so a known repeated failure never
-    pays a provider round trip. The only supported veto shape is
+    The live branch is governed by ``JEV_LIVE_ENFORCEMENT`` and is independent of
+    the supervision mode. The local control lease remains separate. The only
+    supported veto shape is
     ``{"action": "block", "message": ...}`` (see
-    ``hermes_cli/plugins.py::_get_pre_tool_call_directive_details``), and it is
-    returned only in an enforcing supervision mode. Shadow mode, the default,
-    always returns ``None`` and cannot change tool execution.
+    ``hermes_cli/plugins.py::_get_pre_tool_call_directive_details``), and it is returned only when live enforcement is explicitly enabled.
     """
     if not _hooks_enabled():
         return None
     if not tool_name:
         return None
-    if os.environ.get("JEV_LIVE_ENFORCEMENT", "").strip().lower() in {"1", "true", "yes", "on"} and not _supervision.is_read_only_call(tool_name, args):
+    invocation_id = invocation_id or tool_call_id
+    if _live_enforcement_enabled() and not _supervision.is_read_only_call(tool_name, args):
         try:
-            action_text = f"{tool_name} {_safe_text(args, 600)}".lower()
+            risk = _action_risk_flags(tool_name, args)
             state = {
                 "tool_name": tool_name,
+                "action_descriptor": _action_descriptor(tool_name, args),
                 "arguments_sha256": hashlib.sha256(_safe_text(args, 6000).encode()).hexdigest(),
-                "external": True,
-                "reversible": True,
-                "destructive": any(token in action_text for token in ("delete", "destroy", "wipe", "drop", "publish", "send", "deploy")),
-                "credential": any(token in action_text for token in ("password", "secret", "token", "api_key", "credential")),
+                **risk,
             }
             live = _live.authorize_action(state, lambda workflow, payload: _live_evaluate(workflow, payload))
+            if live["decision"] == "ask":
+                return {"action": "approve", "rule_key": tool_name, "message": f"Jev live enforcement requests human approval: {live['reason']}"}
             if live["decision"] != "allow":
                 return {"action": "block", "message": f"Jev live enforcement returned {live['decision']}: {live['reason']}"}
         except Exception as exc:
@@ -736,6 +835,8 @@ def _on_pre_tool_call(
                     "retry with jev_supervision action=allow_retry."
                 ),
             }
+    if not _shadow_observers_enabled():
+        return None
     case_id = None
     try:
         arguments = _safe_text(args, 5000)
