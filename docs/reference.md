@@ -321,7 +321,7 @@ There are three ways to answer a typed question: a hosted provider, which is Jev
 | Mode | `JEV_PROVIDER_MODE=clef`, or the DOGA alias `clef_api` |
 | Endpoint | `POST https://api.cloudflare.com/client/v4/accounts/<CLOUDFLARE_ACCOUNT_ID>/ai/run/@cf/cloudflare/clef` |
 | Body | `{"model": "clef", "state": <state>, "questions": <questions>}` |
-| Credential | `CLOUDFLARE_API_TOKEN`, a Cloudflare API token with **Account > Workers AI > Read**, sent as `Authorization: Bearer` |
+| Credential | `CLOUDFLARE_API_TOKEN`, a Cloudflare API token with **Account > Workers AI > Read**, sent as a bearer token in the `Authorization` header |
 | Configuration | `CLOUDFLARE_ACCOUNT_ID`, the 32 character account id, and `JEV_CLEF_MODEL`, the checkpoint |
 | Checkpoints | `clef` (default) and [`clef-flash`](https://developers.cloudflare.com/workers-ai/models/clef-flash/), both at the `/ai/run/@cf/cloudflare/<model>` path |
 | Limits | 64 questions per request, 65536 token context window |

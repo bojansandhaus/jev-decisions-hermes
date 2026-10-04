@@ -48,7 +48,7 @@ The `clef` provider sends the same `state` and `questions` shape to Cloudflare W
 ```
 
 - **Endpoint.** `POST https://api.cloudflare.com/client/v4/accounts/<CLOUDFLARE_ACCOUNT_ID>/ai/run/@cf/cloudflare/clef`, with the same path under `clef-flash` for that checkpoint.
-- **Credentials.** `CLOUDFLARE_ACCOUNT_ID` scopes the endpoint and `CLOUDFLARE_API_TOKEN` authorises the call. The account id is configuration rather than a secret, but it appears in the URL; the token needs **Account > Workers AI > Read** and is sent as `Authorization: Bearer`. Both are checked before the request is sent, and a missing one fails naming the variable.
+- **Credentials.** `CLOUDFLARE_ACCOUNT_ID` scopes the endpoint and `CLOUDFLARE_API_TOKEN` authorises the call. The account id is configuration rather than a secret, but it appears in the URL; the token needs **Account > Workers AI > Read** and is sent as a bearer token in the `Authorization` header. Both are checked before the request is sent, and a missing one fails naming the variable.
 - **Question ids.** Clef accepts letters, digits, `_`, `.` and `-` only, up to 100 characters, and at most 64 questions per request. The `candidate:aaa` form above has a colon, which Clef refuses, so the plugin rewrites it on the way out and rewrites the answers back on the way in. Your adapter sees its own ids.
 - **Answers.** The same `noul`, `choice` and `score` contract as the other routes, including a `score` read on the legend index scale its ordered `criteria` define.
 - **No fallback.** Clef never falls back to another provider. A Clef failure is an unavailable review; apply your host's conservative fallback rather than assuming an answer exists.
