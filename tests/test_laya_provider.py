@@ -124,21 +124,55 @@ def test_no_hosted_mode_selects_the_local_route_on_its_own(mode):
     assert all(name in jev_client.HOSTED_PROVIDER_MODES for name in order)
 
 
-def test_the_local_route_is_rejected_as_a_fallback_member():
-    with pytest.raises(jev_client.JevClientError, match="not a hosted Jev provider"):
-        jev_client.validate_fallback_order(("typesafe", "laya"))
-    with pytest.raises(jev_client.JevClientError, match="not a hosted Jev provider"):
+def test_the_local_slot_may_lead_a_chain_and_may_trail_one():
+    """Laya may sit at either end of a chain, but never between two hosted hops.
+
+    The trailing case is new in 0.8.0: `api_with_local_fallback` needs a hosted
+    provider leading with the local slot behind it, which was refused before this
+    release because a local server "cannot follow a hosted hop". The sandwich
+    case is still refused, and still for the reason it was: a local server
+    replaces the hosted route rather than being tried between two of them.
+    """
+    assert jev_client.validate_fallback_order(("laya", "openrouter")) == ("laya", "openrouter")
+    assert jev_client.validate_fallback_order(("laya", "typesafe", "openrouter")) == ("laya", "typesafe", "openrouter")
+    assert jev_client.validate_fallback_order(("openrouter", "laya")) == ("openrouter", "laya")
+    assert jev_client.validate_fallback_order(("clef", "laya")) == ("clef", "laya")
+    with pytest.raises(jev_client.JevClientError, match="cannot sit between two hosted hops"):
+        jev_client.validate_fallback_order(("typesafe", "laya", "openrouter"))
+    with pytest.raises(jev_client.JevClientError, match="not a hosted Jev provider chain"):
         jev_client.validate_fallback_order(("laya",))
-    assert jev_client.validate_fallback_order(("typesafe", "openrouter")) == ("typesafe", "openrouter")
+    with pytest.raises(jev_client.JevClientError, match="names a provider twice"):
+        jev_client.validate_fallback_order(("laya", "typesafe", "typesafe"))
+    with pytest.raises(jev_client.JevClientError, match="names a provider twice"):
+        # Only two hosted providers exist, so a third hosted hop always repeats one.
+        jev_client.validate_fallback_order(("typesafe", "openrouter", "typesafe"))
 
 
-# --- the local first chains: Laya primary with hosted fallback, opt in --------
+# --- the local first chains: local slot primary with hosted fallback ----------
+#
+# The local slot leads, a failed local attempt falls through to the hosted
+# providers the mode names, and the chain is the opt in that puts review state on
+# the wire only when the local server does not answer.
 
 LAYA_CHAIN_ORDERS = {
     "laya_then_typesafe": ("laya", "typesafe"),
     "laya_then_openrouter": ("laya", "openrouter"),
     "laya_then_typesafe_openrouter": ("laya", "typesafe", "openrouter"),
     "laya_then_openrouter_typesafe": ("laya", "openrouter", "typesafe"),
+}
+
+# --- the hosted first chains: hosted provider primary, local slot behind it ----
+#
+# New in 0.8.0, and the mirror of the chains above. These are what
+# `api_with_local_fallback` routes with: the review stays on a hosted API while
+# the hosted route works, and falls back to the local server only when it does
+# not. The privacy consequence is the reverse of `laya_then_*`, which stays home
+# until the local server fails.
+
+HOSTED_LOCAL_FALLBACK_ORDERS = {
+    "typesafe_then_laya": ("typesafe", "laya"),
+    "openrouter_then_laya": ("openrouter", "laya"),
+    "clef_then_laya": ("clef", "laya"),
 }
 
 
@@ -158,18 +192,6 @@ def test_the_hosted_keys_a_local_first_chain_names_are_reported_in_order():
     assert jev_client.provider_keys("laya_then_openrouter_typesafe") == ("OPENROUTER_API_KEY", "TYPESAFE_API_KEY")
     assert jev_client.provider_keys("laya") == ()
     assert jev_client.provider_keys("typesafe_then_openrouter") == ("TYPESAFE_API_KEY", "OPENROUTER_API_KEY")
-
-
-def test_laya_may_lead_a_chain_but_never_follow_a_hosted_provider():
-    assert jev_client.validate_fallback_order(("laya", "openrouter")) == ("laya", "openrouter")
-    assert jev_client.validate_fallback_order(("laya", "typesafe", "openrouter")) == ("laya", "typesafe", "openrouter")
-    with pytest.raises(jev_client.JevClientError, match="not a hosted Jev provider"):
-        jev_client.validate_fallback_order(("typesafe", "laya"))
-    with pytest.raises(jev_client.JevClientError, match="names a provider twice"):
-        jev_client.validate_fallback_order(("laya", "typesafe", "typesafe"))
-    with pytest.raises(jev_client.JevClientError, match="names a provider twice"):
-        # Only two hosted providers exist, so a third hosted hop always repeats one.
-        jev_client.validate_fallback_order(("typesafe", "openrouter", "typesafe"))
 
 
 @pytest.mark.parametrize("mode, missing", [
@@ -280,7 +302,13 @@ def test_a_local_first_chain_keeps_the_legend_index_scale():
 
 @pytest.mark.parametrize("mode", sorted(jev_client.PROVIDER_MODES))
 def test_only_the_modes_that_name_laya_include_it(mode):
-    names_laya = mode == "laya" or mode in jev_client.LAYA_CHAIN_MODES
+    """A mode reaches the local slot by naming it, at either end of the chain.
+
+    The local first chains name it first and the hosted first chains name it
+    last; both are modes that name it, and every other mode never reaches a
+    local server at all.
+    """
+    names_laya = mode == "laya" or mode in jev_client.FALLBACK_MODES
     assert ("laya" in jev_client.provider_order(mode)) is names_laya
 
 
@@ -387,7 +415,13 @@ def test_the_doga_aliases_resolve_to_the_modes_documented_for_them(monkeypatch):
         "OPENROUTER_API_KEY", "TYPESAFE_API_KEY")
     for alias, canonical in sorted(jev_client.MODE_ALIASES.items()):
         monkeypatch.setenv("JEV_PROVIDER_MODE", alias)
-        assert jev_client.provider_mode() == canonical
+        resolved = jev_client.provider_mode()
+        # An alias that names a canonical mode resolves through it to the
+        # concrete mode this repository routes with, which is the mode the table
+        # entry is itself resolved through when compared directly.
+        expected = jev_client.resolve_mode(canonical)
+        assert resolved == expected, alias
+        assert jev_client.provider_order(alias) == jev_client.provider_order(canonical)
 
 
 def test_the_alias_behaves_identically_to_the_mode_it_aliases(monkeypatch):

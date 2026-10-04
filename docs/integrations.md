@@ -27,7 +27,11 @@ The default Hermes adapter sends this shape to OpenRouter's Decisions API:
 
 Keep `state` small and redacted. Put definitions in `criteria`, not in a free form prompt. Keep the question count bounded. Treat the returned answer as a recommendation.
 
-Four hosted and local ways to answer that call, and you pick one: Jev over a TypeSafe or OpenRouter key, Clef at Cloudflare Workers AI, Laya locally with no key, or an opt in `laya_then_*` chain that answers locally first and falls through to the named hosted provider. A local `laya-serve` process publishes the same `POST /v1/systemone` shape, so the payload above is unchanged except that `model` names a Laya checkpoint instead of a Jev model and no `Authorization` header is sent. With plain `laya`, `state` never leaves your machine. In a `laya_then_*` mode, a local attempt that fails sends the case state to the named hosted API: that fallback is the point of the mode, and it stops after three consecutive local failures in one process, after which the local error is raised instead of a hosted request. The DOGA names `laya_local`, `laya_with_jev_fallback` and `clef_api` are accepted as aliases for `laya`, `laya_then_openrouter_typesafe` and `clef`. The result carries a `provider_routing` block naming the provider that answered and whether a fallback happened. See [provider settings and the local route](reference.md#provider-settings-and-the-local-route).
+Four canonical modes answer that call, and you pick one: `api_with_local_fallback`, `api_only`, `local_only`, `local_with_api_fallback`. Each says which side leads and whether the other side is a fallback, and none of them names a particular provider. The hosted side is whatever credential you have configured: Jev over a TypeSafe or OpenRouter key, or Clef at Cloudflare Workers AI. The local side is a `POST /v1/systemone` server, and `laya` is the name of that slot rather than a binding to one model: `model` in the payload names whichever engine `JEV_LOCAL_MODEL` selects.
+
+With plain `laya` or `local_only`, `state` never leaves your machine. In `local_with_api_fallback` (or a `laya_then_*` mode), a local attempt that fails sends the case state to the named hosted API: that fallback is the point of the mode, and it stops after three consecutive local failures in one process, after which the local error is raised instead of a hosted request. In `api_with_local_fallback` (or a `<hosted>_then_laya` mode) the order is reversed: the review goes to the hosted API and the local server answers only when the hosted route fails.
+
+`api_only` and `local_only` never reroute a failure. The DOGA names `laya_local`, `laya_with_jev_fallback`, `clef_api` and `jev_api` are accepted as aliases, as are `clef_with_local_fallback` and `laya_then_hosted`. The result carries a `provider_routing` block naming the provider that answered and whether a fallback happened. See [provider settings and the local route](reference.md#provider-settings-and-the-local-route) and [the four canonical modes](reference.md#the-four-canonical-modes).
 
 ## The Clef route
 
@@ -51,9 +55,47 @@ The `clef` provider sends the same `state` and `questions` shape to Cloudflare W
 - **Credentials.** `CLOUDFLARE_ACCOUNT_ID` scopes the endpoint and `CLOUDFLARE_API_TOKEN` authorises the call. The account id is configuration rather than a secret, but it appears in the URL; the token needs **Account > Workers AI > Read** and is sent as a bearer token in the `Authorization` header. Both are checked before the request is sent, and a missing one fails naming the variable.
 - **Question ids.** Clef accepts letters, digits, `_`, `.` and `-` only, up to 100 characters, and at most 64 questions per request. The `candidate:aaa` form above has a colon, which Clef refuses, so the plugin rewrites it on the way out and rewrites the answers back on the way in. Your adapter sees its own ids.
 - **Answers.** The same `noul`, `choice` and `score` contract as the other routes, including a `score` read on the legend index scale its ordered `criteria` define.
-- **No fallback.** Clef never falls back to another provider. A Clef failure is an unavailable review; apply your host's conservative fallback rather than assuming an answer exists.
+- **No fallback, unless you ask for one.** Clef alone never falls back to another provider: a Clef failure is an unavailable review, so apply your host's conservative fallback rather than assuming an answer exists. The single exception is the opt in `clef_then_laya` chain, reachable as `clef_with_local_fallback`, where you have explicitly chosen the local slot as Clef's backstop. It is not a second classifier answering in Clef's place; it is the other side of the same contract, and you asked for it by name.
 
 Egress is the point of the route, exactly as it is for any hosted provider: `state` leaves your machine and reaches Cloudflare. Redact it first, on the same terms as the other routes. A failure logs only the provider name and the exception class, never the state and never the credential.
+
+## Pointing the local slot at a different engine
+
+`laya` is a **slot**, not a model. Two settings decide what answers inside it, and neither is a code change:
+
+| Setting | Default | What it decides |
+|---|---|---|
+| `JEV_LAYA_BASE_URL` | `http://127.0.0.1:8123` | Which server answers. Its own setting, unchanged by this release. |
+| `JEV_LOCAL_MODEL` | `english` | Which engine that server is asked for, sent as the `model` field. |
+
+`JEV_LAYA_MODEL` is the name `JEV_LOCAL_MODEL` had before the slot became generic. It still works, and `JEV_LOCAL_MODEL` wins when both are set. The default is unchanged, so a default configuration still asks for `english`.
+
+To swap the engine, change one variable:
+
+```bash
+JEV_PROVIDER_MODE=local_only
+JEV_LAYA_BASE_URL=http://127.0.0.1:8123
+JEV_LOCAL_MODEL=tev1
+```
+
+Engines known to answer the same `/v1/systemone` contract: `laya` with its `multilingual` and `typed-decisions` engine names, `kev`, `tev1` (Together AI's open-weight System One decision model, `Tev1-4B` and `Tev1-0.8B`), and the `jeff` family such as `jeff-qwen3.5-0.8b` and `jeff-gemma4-e2b`. There is deliberately **no allowlist**: an engine nobody has heard of works the same way, because the whole point is that adding a model is a configuration change rather than a code change.
+
+### A worked example: `chaitin/Decis`
+
+[chaitin/Decis](https://github.com/chaitin/Decis) is a self hosted decision server that publishes this same Jev compatible `/v1/systemone` endpoint and serves more than one engine, with one Docker image per engine. Repointing at a different engine there is a `base_url` change and nothing else, which is the practical demonstration that the slot is interchangeable:
+
+```bash
+# Run the server with the engine you want, then:
+JEV_PROVIDER_MODE=local_only
+JEV_LAYA_BASE_URL=http://127.0.0.1:8080
+JEV_LOCAL_MODEL=<the engine name that Decis is serving>
+```
+
+Three rules hold for any engine in the slot:
+
+- **The contract is the `/v1/systemone` shape, not the model name.** Your adapter sends the payload above unchanged; only `model` differs, and no `Authorization` header is sent unless your server was started with its own bearer check.
+- **The score scale is the local one.** A `score` answer is a legend index into the ordered `criteria`, validated on the same scale as the hosted routes.
+- **A value that would corrupt the request is refused before any socket opens.** An empty or whitespace-only `JEV_LOCAL_MODEL`, or one carrying a quote, a backslash, a control character, a `/`, a `?`, a `#` or a `%`, raises naming the setting and the reason without echoing the value back.
 
 ## Adapter contract for another agent
 

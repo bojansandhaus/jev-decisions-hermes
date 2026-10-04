@@ -1,22 +1,49 @@
-"""Shared bounded client for Jev, for Cloudflare Clef, or for Laya locally.
+"""Shared bounded client for Jev, for Cloudflare Clef, or for a local model.
 
 Four arrangements for a typed question: a hosted Jev provider behind an API key,
-the hosted Cloudflare Clef provider behind a Cloudflare token, a local
-`laya-serve` process that needs no key at all, or an opt in chain that starts at
-the local server and falls through to the hosted providers it names. The plain
+the hosted Cloudflare Clef provider behind a Cloudflare token, a local decision
+server that needs no key at all, or an opt in chain between the two. The plain
 local route replaces the hosted ones rather than joining the chain. Only the
-`laya_then_*` modes let a failed local attempt reach a hosted provider.
+local first chains let a failed local attempt reach a hosted provider.
 
 Clef is a provider, not a Jev key: it is selected by its own name, it is never
 appended to a mode that does not name it, and it falls back to nothing. `clef`
 and `clef-flash` are two checkpoints of that one provider, chosen with
 `JEV_CLEF_MODEL`, so `clef-flash` is never a provider name of its own.
 
-Three of DOGA's selector names are accepted as aliases for the arrangements
-above: `laya_local` for the plain local mode, `laya_with_jev_fallback` for the
+**The four canonical modes.** Every arrangement above is named by one of four
+canonical mode names, each of which says which side leads and whether the other
+side is a fallback:
+
+| Mode | Leads | Fallback |
+|---|---|---|
+| `api_with_local_fallback` | the hosted API | the local slot |
+| `api_only` | the hosted API | none |
+| `local_only` | the local slot | none |
+| `local_with_api_fallback` | the local slot | the hosted API |
+
+`api_only` and `local_only` are single provider routes: a failure is reported,
+never rerouted. The other two are two provider chains and use the cooldown,
+trigger and breaker machinery below unchanged. This repository also keeps its
+own finer grained mode names, which name a concrete provider order directly:
+`typesafe`, `openrouter`, `clef`, `typesafe_then_openrouter`,
+`openrouter_then_typesafe`, and the four `laya_then_*` local first chains. Those
+are not renamed by this contract and not deprecated; each still resolves to the
+exact order it always named. `MODE_ALIASES` and `CANONICAL_MODES` hold the whole
+mapping, and `resolve_mode` turns any accepted name into the one canonical mode
+name every code path below uses, so no alias string reaches a chain, a
+diagnostic, a log line, or a URL.
+
+**The local slot is a slot, not a model.** `laya` selects it, and the engine or
+checkpoint it speaks is chosen with `JEV_LOCAL_MODEL`. Any local model that
+answers the same `/v1/systemone` contract fits, selected by configuration alone
+and with no new provider name and no code change. See `local_model`.
+
+Three of DOGA's selector names are accepted as aliases as well:
+`laya_local` for the plain local mode, `laya_with_jev_fallback` for the
 local first chain that names both hosted Jev providers, and `clef_api` for Clef
-alone. `MODE_ALIASES` holds the mapping, and `resolve_mode` turns either
-vocabulary into the one canonical mode name every code path below uses.
+alone. `resolve_mode` turns every vocabulary into the one canonical mode name
+every code path below uses.
 
 A local failure may reach a hosted provider only until it has failed three times
 in a row. The count is per process, so a restart resets it, and any local answer
@@ -79,26 +106,71 @@ HOSTED_PROVIDER_MODES = frozenset({
     TYPESAFE_PROVIDER, OPENROUTER_PROVIDER, CLEF_PROVIDER,
     "typesafe_then_openrouter", "openrouter_then_typesafe",
 })
-# Local first chains. Laya answers from the local server, and a failed local
-# attempt falls through to the named hosted providers in the order given. These
-# are the only modes where one review can reach both a local and a hosted route.
+# Local first chains. The local slot answers from the local server, and a failed
+# local attempt falls through to the named hosted providers in the order given.
+# These are the only modes where one review can reach both a local and a hosted
+# route.
 LAYA_CHAIN_MODES = frozenset({
     "laya_then_typesafe",
     "laya_then_openrouter",
     "laya_then_typesafe_openrouter",
     "laya_then_openrouter_typesafe",
 })
-PROVIDER_MODES = HOSTED_PROVIDER_MODES | LAYA_CHAIN_MODES | {LAYA_PROVIDER}
+# Hosted first chains that fall back to the local slot. These are the only modes
+# where a hosted failure is a licence to call the local server, which is the
+# mirror image of `LAYA_CHAIN_MODES`: there the local server leads and a hosted
+# provider answers, here a hosted provider leads and the local server answers.
+HOSTED_LOCAL_FALLBACK_MODES = frozenset({
+    "typesafe_then_laya",
+    "openrouter_then_laya",
+    "clef_then_laya",
+})
+# Every mode that is a chain rather than a single provider. A chain gets the
+# routing block, the pre flight key check, and the multi route request path.
+FALLBACK_MODES = LAYA_CHAIN_MODES | HOSTED_LOCAL_FALLBACK_MODES
+PROVIDER_MODES = HOSTED_PROVIDER_MODES | FALLBACK_MODES | {LAYA_PROVIDER}
+# The four canonical modes of the shared provider contract. Each names which
+# side leads and whether the other side is a fallback, and says nothing about
+# which hosted provider or which local engine fills the slots. They are selectable
+# on their own: the resolution order below turns each one into the concrete
+# provider order this repository routes with.
+API_WITH_LOCAL_FALLBACK = "api_with_local_fallback"
+API_ONLY = "api_only"
+LOCAL_ONLY = "local_only"
+LOCAL_WITH_API_FALLBACK = "local_with_api_fallback"
+CANONICAL_MODES = frozenset({
+    API_WITH_LOCAL_FALLBACK, API_ONLY, LOCAL_ONLY, LOCAL_WITH_API_FALLBACK,
+})
+# The two single provider canonical modes. `api_only` and `local_only` name no
+# fallback at all: a failure on either is reported, never rerouted, so a single
+# provider route is exactly one hop.
+CANONICAL_SINGLE_MODES = frozenset({API_ONLY, LOCAL_ONLY})
 # A provider bound to the local machine carries no credential requirement, so an
 # empty key means "send no Authorization header", not "disabled".
 KEYLESS_PROVIDERS = frozenset({LAYA_PROVIDER})
+# Which concrete order each canonical mode resolves to when it names no provider
+# of its own. `api_only` resolves by credential instead (see
+# `_hosted_provider_by_credential`), so it has no fixed entry: the hosted side is
+# configuration, not a preference this module may impose.
+#
+# The two fallback canonical modes are chains. `api_with_local_fallback` is the
+# hosted provider leading with the local slot behind it, which is the mirror of
+# `local_with_api_fallback`; the paired `<hosted>_then_laya` mode is named in
+# `FALLBACK_ORDER` and is selected by credential as well, so that a Clef hosted
+# side falls back to the local slot rather than to an unrelated Jev provider.
+CANONICAL_MODE_DEFAULTS: dict[str, str] = {
+    LOCAL_ONLY: LAYA_PROVIDER,
+    LOCAL_WITH_API_FALLBACK: "laya_then_openrouter_typesafe",
+}
 # DOGA names four arrangements: `jev_api`, `clef_api`, `laya_local`, and
 # `laya_with_jev_fallback`. `jev_api` is the hosted Jev arrangement this
-# repository already has under its own hosted mode names, so it needs no alias.
-# The other three are accepted here and resolved to a canonical mode before
-# anything routes:
+# repository already has under its own hosted mode names, so it resolves through
+# the credential-resolving alias below rather than a fixed order. The other
+# three are accepted here and resolved to a canonical mode before anything
+# routes:
 #
 #   clef_api               -> clef
+#   jev_api                -> api_only, hosted side by credential
 #   laya_local             -> laya
 #   laya_with_jev_fallback -> laya_then_openrouter_typesafe
 #
@@ -113,11 +185,24 @@ KEYLESS_PROVIDERS = frozenset({LAYA_PROVIDER})
 # second classifier: the alias names no fallback at all.
 MODE_ALIASES: dict[str, str] = {
     "clef_api": CLEF_PROVIDER,
+    "jev_api": API_ONLY,
     "laya_local": LAYA_PROVIDER,
     "laya_with_jev_fallback": "laya_then_openrouter_typesafe",
+    # The shared contract's own names for the two arrangements this repository
+    # already spells out with a provider order. They are accepted alongside the
+    # canonical four and behave exactly like the mode each one denotes.
+    "clef_with_local_fallback": API_WITH_LOCAL_FALLBACK,
+    "laya_then_hosted": LOCAL_WITH_API_FALLBACK,
 }
-# Every value `JEV_PROVIDER_MODE` accepts: the canonical modes plus the aliases.
-ACCEPTED_MODES = frozenset(PROVIDER_MODES | set(MODE_ALIASES))
+# The two canonical modes whose hosted side is configuration rather than a fixed
+# order. `api_only` names no fallback, so only the hosted provider is resolved;
+# `api_with_local_fallback` resolves the same provider and pairs it with the local
+# slot. The two local side modes are fixed orders and never read a credential here.
+_CREDENTIAL_RESOLVED_MODES = frozenset({API_ONLY, API_WITH_LOCAL_FALLBACK})
+# Every value `JEV_PROVIDER_MODE` accepts: the canonical modes plus the modes
+# this repository already named directly, plus the aliases.
+PROVIDER_MODES_ALL = PROVIDER_MODES | CANONICAL_MODES
+ACCEPTED_MODES = frozenset(PROVIDER_MODES_ALL | set(MODE_ALIASES))
 # Consecutive local failure limit. The first three consecutive local failures in a
 # process may fall through to a hosted provider; the fourth and every one after it
 # re-raises the local error instead. Hardcoded, per process, and never persisted.
@@ -136,10 +221,49 @@ FALLBACK_ORDER: dict[str, tuple[str, ...]] = {
     "laya_then_openrouter": (LAYA_PROVIDER, OPENROUTER_PROVIDER),
     "laya_then_typesafe_openrouter": (LAYA_PROVIDER, TYPESAFE_PROVIDER, OPENROUTER_PROVIDER),
     "laya_then_openrouter_typesafe": (LAYA_PROVIDER, OPENROUTER_PROVIDER, TYPESAFE_PROVIDER),
+    # Hosted first chains with the local slot behind the hosted provider. A hosted
+    # failure falls through to the local server here, which is the mirror of the
+    # `laya_then_*` orders above and is what `api_with_local_fallback` routes with.
+    "typesafe_then_laya": (TYPESAFE_PROVIDER, LAYA_PROVIDER),
+    "openrouter_then_laya": (OPENROUTER_PROVIDER, LAYA_PROVIDER),
+    "clef_then_laya": (CLEF_PROVIDER, LAYA_PROVIDER),
 }
 LAYA_BASE_URL_DEFAULT = "http://127.0.0.1:8123"
 LAYA_ENDPOINT_PATH_DEFAULT = "/v1/systemone"
 LAYA_MODEL_DEFAULT = "english"
+# The local slot's engine or checkpoint, and the setting that chooses it.
+#
+# `laya` selects the local slot. It does not bind the slot to one model: the
+# value here is the engine or checkpoint name the request asks for, so any local
+# model that answers the same `/v1/systemone` contract is selected by
+# configuration alone, with no new provider name and no code change. Laya's own
+# three engine names (`english`, `multilingual`, `typed-decisions`) are what a
+# `laya-serve` serves, and other local engines are selected by their own names.
+#
+# **The default request is unchanged.** The default value is still `english`,
+# which is the checkpoint `laya-serve` serves by default and the only one this
+# repository has ever called. `laya` is the default *slot*, and `english` is the
+# default *engine in that slot*: the slot is Laya's, so the checkpoint Laya
+# serves by default is what it answers. A default configuration therefore sends
+# exactly the request it always sent, which is the requirement that outranks a
+# literal reading of "defaults to laya".
+LOCAL_MODEL_DEFAULT = LAYA_MODEL_DEFAULT
+LOCAL_MODEL_ENV = "JEV_LOCAL_MODEL"
+# `JEV_LAYA_MODEL` is the pre-existing name for the same setting and keeps
+# working. When both are set, `JEV_LOCAL_MODEL` wins, because it is the generic
+# name and the repository's rule is that the newest spelling of a setting is the
+# explicit one. Recorded in the docs, in that order.
+LAYA_MODEL_ENV = "JEV_LAYA_MODEL"
+# Characters a local model name may not contain. This is not an allowlist of
+# model names: an engine nobody has heard of must work without a code change. It
+# is a refusal of values that would corrupt the request, because the name is
+# interpolated into a JSON string and may reach the server as a path segment.
+# Anything that could terminate a JSON string, change its type, split the body,
+# rewrite a URL path, smuggle a header, or hide its own trailing characters is
+# refused here rather than sent.
+_LOCAL_MODEL_FORBIDDEN = frozenset('"\\/\x00\r\n\t') | frozenset({chr(code) for code in range(0x20)}) | frozenset({
+    "<", ">", "&", "%", "?", "#", "`", "$", "*", "|", "^", "~",
+})
 # CPU inference on the base checkpoint measured about 1.6 seconds per question
 # row and roughly 2 seconds for a whole six question review on 2026-09-26, so the
 # local route gets a longer budget than the hosted default of 30 seconds.
@@ -156,14 +280,23 @@ class JevSchemaError(JevClientError):
     """The provider returned a response outside the typed contract."""
 
 
-def resolve_mode(name: str) -> str:
+def resolve_mode(name: str, environ: Mapping[str, str] | None = None) -> str:
     """The canonical mode an accepted name selects, or an error naming the accepted set.
 
-    Two vocabularies name the same arrangements: this repository's own mode names,
-    and the DOGA selector aliases in ``MODE_ALIASES``. Resolution happens once,
-    here, so every code path below sees a canonical mode and no routing decision
-    depends on which vocabulary the caller used.
+    Three vocabularies name the same arrangements: the four canonical modes of
+    the shared provider contract, this repository's own mode names, and the
+    aliases in ``MODE_ALIASES``. Resolution happens once, here, so every code
+    path below sees a canonical mode and no routing decision depends on which
+    vocabulary the caller used.
+
+    A canonical mode resolves to the concrete mode this repository routes with,
+    because that is the layer that knows its own provider orders. Its hosted side
+    is chosen by configuration rather than fixed here, so ``api_only`` and
+    ``api_with_local_fallback`` reach whichever hosted provider is actually
+    configured instead of a hard coded one.
     """
+    if name in CANONICAL_MODES:
+        return _canonical_mode_order(name, environ)
     if name in PROVIDER_MODES:
         return name
     alias = MODE_ALIASES.get(name)
@@ -171,32 +304,86 @@ def resolve_mode(name: str) -> str:
         raise JevClientError(
             f"JEV_PROVIDER_MODE must be one of: {', '.join(sorted(ACCEPTED_MODES))}"
         )
+    if alias in CANONICAL_MODES:
+        return _canonical_mode_order(alias, environ)
     return alias
 
 
-def provider_mode(value: str | None = None) -> str:
+def _canonical_mode_order(mode: str, environ: Mapping[str, str] | None = None) -> str:
+    """The concrete mode name a canonical mode routes with in this repository.
+
+    Two of the four take a fixed route: `local_only` is the plain local slot and
+    `local_with_api_fallback` is the local first chain that names both hosted Jev
+    providers, which is the strongest local first route this repository has and is
+    what `laya_with_jev_fallback` already selected.
+
+    The two hosted side modes resolve their hosted provider by credential instead
+    of by preference, because the contract says the hosted side is chosen by
+    configuration and this module must not impose one: `api_only` becomes that
+    provider alone, and `api_with_local_fallback` becomes that provider leading
+    with the local slot behind it.
+    """
+    hosted = (
+        _hosted_provider_by_credential(environ)
+        if mode in _CREDENTIAL_RESOLVED_MODES else ""
+    )
+    # `api_only` is the one canonical mode that resolves to a hosted provider
+    # and nothing else. It has no local hop and no chain, which is the whole
+    # difference between it and `api_with_local_fallback`.
+    if mode == API_ONLY:
+        return hosted
+    if mode in CANONICAL_MODE_DEFAULTS:
+        return CANONICAL_MODE_DEFAULTS[mode]
+    return f"{hosted}_then_{LAYA_PROVIDER}"
+
+
+def _hosted_provider_by_credential(environ: Mapping[str, str] | None = None) -> str:
+    """The hosted provider a credential resolving mode selects.
+
+    Clef needs two variables rather than one, so it is only selected when both
+    are present: a token without an account id cannot route anywhere, and
+    selecting it anyway would report a confusing provider error later. With no
+    hosted credential at all the repository's default hosted provider is named,
+    so the missing key is reported by the existing selection check rather than by
+    an invented mode, and an `api_with_local_fallback` chain still has a hosted
+    hop to try before the local slot answers.
+    """
+    env = os.environ if environ is None else environ
+    if (env.get(CLEF_ACCOUNT_ENV) or "").strip() and (env.get(CLEF_TOKEN_ENV) or "").strip():
+        return CLEF_PROVIDER
+    for provider in (OPENROUTER_PROVIDER, TYPESAFE_PROVIDER):
+        if (env.get(PROVIDER_KEY_ENV[provider]) or "").strip():
+            return provider
+    return OPENROUTER_PROVIDER
+
+
+def provider_mode(value: str | None = None, environ: Mapping[str, str] | None = None) -> str:
     """Return the selected route, defaulting to the legacy OpenRouter path.
 
-    ``laya`` selects a local server instead of a hosted provider: a replacement
-    for the hosted pair, not a third member of it. The ``laya_then_*`` modes are
-    the opt in chains, where a failed local attempt falls through to the named
-    hosted provider or providers. The DOGA aliases ``laya_local`` and
-    ``laya_with_jev_fallback`` are accepted and resolve to the modes above.
+    `laya` selects the local slot instead of a hosted provider: a replacement for
+    the hosted pair, not a third member of it. The `laya_then_*` modes are the
+    local first chains, where a failed local attempt falls through to the named
+    hosted provider or providers, and the `<hosted>_then_laya` modes are their
+    mirror, where a hosted failure falls through to the local slot. The four
+    canonical modes and the DOGA aliases are accepted and resolve to the modes
+    above.
     """
-    selected = (value or os.environ.get("JEV_PROVIDER_MODE", "openrouter")).strip().lower()
-    return resolve_mode(selected)
+    env = os.environ if environ is None else environ
+    selected = (value or env.get("JEV_PROVIDER_MODE", "openrouter")).strip().lower()
+    return resolve_mode(selected, env)
 
 
 def validate_fallback_order(names: Any) -> tuple[str, ...]:
     """Return an ordered provider chain, rejecting any shape a mode does not name.
 
-    A hosted chain is one or two hosted providers. A local first chain may begin
-    with Laya, which is keyless, and then name the hosted providers that answer a
-    failed local attempt. Laya may only be the first member: it never trails a
-    hosted provider, because a local server replaces the hosted route rather than
-    being tried after one of them fails. A chain alone is not a mode, so
-    ``(LAYA_PROVIDER,)`` is rejected here; the plain local mode is selected by its
-    own name instead.
+    A chain is one or more hosted providers, optionally with the local slot at
+    either end but never in the middle. Laya may lead a chain, where a failed
+    local attempt falls through to the hosted providers it names, and Laya may
+    trail a chain, where a failed hosted attempt falls through to the local
+    server. It may do neither in the middle, because a local server replaces the
+    hosted route rather than being sandwiched between two hosted hops. A chain
+    alone is not a mode, so ``(LAYA_PROVIDER,)`` is rejected here; the plain
+    local mode is selected by its own name instead.
     """
     order = tuple(names)
     if not order:
@@ -209,10 +396,10 @@ def validate_fallback_order(names: Any) -> tuple[str, ...]:
             )
         if name != LAYA_PROVIDER:
             continue
-        if index != 0:
+        if 0 < index < len(order) - 1:
             raise JevClientError(
                 "invalid Jev fallback order: Laya is a local provider, not a hosted Jev "
-                "provider, so it cannot follow a hosted hop"
+                "provider, so it cannot sit between two hosted hops"
             )
         if len(order) == 1:
             raise JevClientError(
@@ -224,17 +411,19 @@ def validate_fallback_order(names: Any) -> tuple[str, ...]:
     return order
 
 
-def provider_order(mode: str) -> tuple[str, ...]:
+def provider_order(mode: str, environ: Mapping[str, str] | None = None) -> tuple[str, ...]:
     """The providers a mode uses, in the order it tries them.
 
     A pinned hosted mode is one provider and a chained hosted mode is two. A
-    ``laya_then_*`` mode starts at the local server and names one or both hosted
-    providers after it. The plain local mode is exactly one: itself. Only a mode
-    that names the local route reaches it, so selecting a hosted mode never
-    contacts a local server by accident and no mode appends Laya silently. A DOGA
-    alias is resolved first, so it reports the order of the mode it aliases.
+    `laya_then_*` mode starts at the local server and names one or both hosted
+    providers after it, and a `<hosted>_then_laya` mode is the mirror: the hosted
+    provider first, the local server behind it. The plain local mode is exactly
+    one: itself. Only a mode that names the local slot reaches it, so selecting a
+    hosted mode never contacts a local server by accident and no mode appends
+    Laya silently. A canonical mode or an alias is resolved first, so it reports
+    the order of the mode it aliases.
     """
-    mode = resolve_mode(mode)
+    mode = resolve_mode(mode, environ)
     if mode == LAYA_PROVIDER:
         return (LAYA_PROVIDER,)
     return validate_fallback_order(FALLBACK_ORDER.get(mode, (mode,)))
@@ -244,14 +433,19 @@ def _hosted_key_names(order: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(PROVIDER_KEY_ENV[name] for name in order if name not in KEYLESS_PROVIDERS)
 
 
-def provider_keys(mode: str) -> tuple[str, ...]:
+def provider_keys(mode: str, environ: Mapping[str, str] | None = None) -> tuple[str, ...]:
     """Environment variable names for a mode's hosted providers, in chain order."""
-    return _hosted_key_names(provider_order(mode))
+    return _hosted_key_names(provider_order(mode, environ))
 
 
-def uses_local_hop(mode: str) -> bool:
-    """True when a mode begins at the local server and needs the longer local budget."""
-    return provider_order(mode)[0] in KEYLESS_PROVIDERS
+def uses_local_hop(mode: str, environ: Mapping[str, str] | None = None) -> bool:
+    """True when a mode's local budget is needed because it names the local slot.
+
+    The longer budget goes to the local hop whenever the chain contains one, not
+    only when it leads it, so a hosted first chain that falls through to the local
+    server waits as long as that server needs.
+    """
+    return LAYA_PROVIDER in provider_order(mode, environ)
 
 
 def _note_local_failure() -> bool:
@@ -300,6 +494,53 @@ def validate_laya_endpoint(url: str) -> str:
     )
 
 
+def local_model(value: Any = None, environ: Mapping[str, str] | None = None) -> str:
+    """The engine or checkpoint the local slot asks for, by default `laya`.
+
+    The provider name in configuration stays `laya`; what it selects is the slot,
+    not one model. This value is what the request asks the local server for, so a
+    different local model that answers the same `/v1/systemone` contract is
+    selected here alone, with no new provider name and no code change.
+
+    `JEV_LOCAL_MODEL` is the setting; `JEV_LAYA_MODEL` is the name this setting
+    had before the slot became generic, and it still works. When both are set,
+    `JEV_LOCAL_MODEL` wins, because it is the name that is not tied to one model.
+    An unset value is the default, and an empty or whitespace value is refused
+    rather than silently treated as the default: an operator who blanked the
+    setting meant something, and the default is what they get by leaving it out.
+
+    **There is no allowlist of model names.** An engine nobody has heard of must
+    work without a code change, so the check is only that the value is safe to
+    carry: not empty, and free of characters that would corrupt the JSON body it
+    is interpolated into or rewrite a URL path segment it might become.
+    """
+    env = os.environ if environ is None else environ
+    if value is None:
+        # Presence is what distinguishes "left unset" from "blanked on purpose",
+        # because an environment variable set to an empty string is still present
+        # in the mapping. An unset setting takes the default; a blanked one is a
+        # mistake worth reporting rather than silently covering over.
+        if LOCAL_MODEL_ENV in env:
+            value = env[LOCAL_MODEL_ENV]
+        elif LAYA_MODEL_ENV in env:
+            value = env[LAYA_MODEL_ENV]
+        else:
+            return LOCAL_MODEL_DEFAULT
+    if not isinstance(value, str) or not value.strip():
+        raise JevClientError(
+            f"{LOCAL_MODEL_ENV} must name a local decision model, such as "
+            f"{LOCAL_MODEL_DEFAULT!r}; leave it unset to take the default"
+        )
+    name = value.strip()
+    unsafe = sorted({character for character in name if character in _LOCAL_MODEL_FORBIDDEN})
+    if unsafe:
+        raise JevClientError(
+            f"{LOCAL_MODEL_ENV} must be a model name usable as a JSON string and as a "
+            f"URL path segment; refuse the character(s) {', '.join(repr(c) for c in unsafe)}"
+        )
+    return name
+
+
 def laya_key(environ: Mapping[str, str] | None = None) -> str:
     """The optional bearer a local server was started with. Usually empty.
 
@@ -312,12 +553,16 @@ def laya_key(environ: Mapping[str, str] | None = None) -> str:
 
 
 def laya_route(environ: Mapping[str, str] | None = None) -> tuple[str, str]:
-    """The local server URL and checkpoint, which are settings rather than secrets."""
+    """The local server URL and the engine or checkpoint it is asked for.
+
+    Both are settings rather than secrets. The URL is the slot's own setting, so
+    pointing the slot at a different engine's server is a configuration change and
+    not a code change; `local_model` chooses the engine that server is asked for.
+    """
     env = os.environ if environ is None else environ
     base = (env.get("JEV_LAYA_BASE_URL") or LAYA_BASE_URL_DEFAULT).strip().rstrip("/")
     path = (env.get("JEV_LAYA_ENDPOINT_PATH") or LAYA_ENDPOINT_PATH_DEFAULT).strip()
-    model = (env.get("JEV_LAYA_MODEL") or LAYA_MODEL_DEFAULT).strip()
-    return validate_laya_endpoint(f"{base}/{path.lstrip('/')}"), model
+    return validate_laya_endpoint(f"{base}/{path.lstrip('/')}"), local_model(environ=env)
 
 
 def clef_credentials(api_key: str | None = None, environ: Mapping[str, str] | None = None
@@ -616,12 +861,12 @@ def request_decisions(
             "JEV_PROVIDER_MODE=laya answers from a local server in place of the hosted "
             "providers, so there is no hosted fallback to authenticate"
         )
-    if mode in LAYA_CHAIN_MODES:
+    if mode in FALLBACK_MODES:
         _require_hosted_keys(mode, order, api_key, fallback_api_key)
     if mode == CLEF_PROVIDER:
-        # Clef is a hosted route with no fallback, so a failed review is raised
-        # rather than degrading into another classifier. Its credentials and its
-        # checkpoint are checked before the transport is touched.
+        # Clef alone is a hosted route with no fallback, so a failed review is
+        # raised rather than degrading into another classifier. Its credentials
+        # and its checkpoint are checked before the transport is touched.
         try:
             return _request_clef(state, questions, transport=transport, timeout=timeout,
                                  api_key=api_key)
@@ -634,7 +879,7 @@ def request_decisions(
             raise
     if local_first:
         validate_laya_questions(questions)
-    if transport is not None and mode not in LAYA_CHAIN_MODES:
+    if transport is not None and mode not in FALLBACK_MODES:
         route_model = laya_route()[1] if local else model
         local_key = laya_key() if local else (api_key or "")
         if not local and (not api_key or not isinstance(api_key, str)):
@@ -660,6 +905,8 @@ def request_decisions(
             hosted_index += 1
         if name == LAYA_PROVIDER:
             endpoint, route_model = laya_route()
+        elif name == CLEF_PROVIDER:
+            endpoint, route_model = clef_route()
         elif name == TYPESAFE_PROVIDER:
             endpoint, route_model = TYPESAFE_ENDPOINT, TYPESAFE_MODEL
         else:
@@ -675,13 +922,16 @@ def request_decisions(
             continue
         try:
             if transport is not None:
-                result = _transport_once(transport, state, questions, route_key, endpoint, route_model, timeout)
+                result = _transport_once(transport, state, questions, route_key, endpoint, route_model, timeout,
+                                         provider=name)
             else:
                 result = _request_once(state, questions, route_key, endpoint, route_model, timeout)
         except JevClientError as exc:
-            # Only a chain has a hosted hop to fall through to, so only a chain counts
-            # a local failure or can suppress one. The plain local mode has neither a
-            # hosted hop nor anything to suppress, so its failure leaves the count alone.
+            # Only a local first chain turns a local failure into egress to a
+            # hosted provider, so only that chain counts the failure or can
+            # suppress one. The plain local mode and a hosted first chain have
+            # neither a hosted hop to reach nor anything to suppress, so their
+            # local failure leaves the count alone.
             if mode in LAYA_CHAIN_MODES and name in KEYLESS_PROVIDERS:
                 if _note_local_failure():
                     # Only the exception class is logged, never the reviewed state.
@@ -731,8 +981,26 @@ def _require_hosted_keys(mode: str, order: tuple[str, ...], api_key: Any, fallba
 
 
 def _transport_once(transport: Callable[..., Any], state: Any, questions: dict[str, Any],
-                    api_key: str, endpoint: str, model: str, timeout: float) -> dict[str, Any]:
-    """One chain hop through an injected transport, so a test can watch the route."""
+                    api_key: str, endpoint: str, model: str, timeout: float,
+                    provider: str = "") -> dict[str, Any]:
+    """One chain hop through an injected transport, so a test can watch the route.
+
+    Clef's id mapping and envelope reader are applied here rather than in a
+    second chain implementation, so a Clef hop inside `clef_then_laya` behaves
+    exactly as Clef does alone. The caller's own question ids go back on before
+    the result leaves this function, so nothing above it can tell a rewritten id
+    was sent.
+    """
+    if provider == CLEF_PROVIDER:
+        safe_questions, restore = clef_question_ids(questions)
+        validate_laya_questions(safe_questions)
+        payload = {"model": model, "state": state, "questions": safe_questions}
+        response = transport(payload, api_key=api_key, timeout=timeout, endpoint=endpoint)
+        if not isinstance(response, dict):
+            raise JevSchemaError("transport returned a non-object")
+        result = _clef_result(response)
+        result["answers"] = restore(validate_clef_answers(result["answers"], safe_questions))
+        return result
     payload = {"model": model, "state": state, "questions": questions}
     response = transport(payload, api_key=api_key, timeout=timeout, endpoint=endpoint)
     if not isinstance(response, dict):
@@ -743,14 +1011,14 @@ def _transport_once(transport: Callable[..., Any], state: Any, questions: dict[s
 
 def _with_routing(result: dict[str, Any], mode: str, routes: list[tuple[str, str, str, str]],
                   answered_index: int, attempts: list[dict[str, str]]) -> dict[str, Any]:
-    """Add the routing diagnostics a ``laya_then_*`` chain has to report.
+    """Add the routing diagnostics a chain has to report.
 
-    Only the local first chains add this block, so the hosted modes and the plain
-    local mode keep returning exactly the provider's own response. `provider` is
-    the hop that answered, `fallback_used` says whether the successful hop was a
-    fallback, and `attempts` records the earlier hops that failed.
+    Only a chain adds this block, so the single provider modes keep returning
+    exactly the provider's own response. `provider` is the hop that answered,
+    `fallback_used` says whether the successful hop was a fallback, and
+    `attempts` records the earlier hops that failed.
     """
-    if mode not in LAYA_CHAIN_MODES:
+    if mode not in FALLBACK_MODES:
         return result
     return {
         **result,
@@ -763,6 +1031,40 @@ def _with_routing(result: dict[str, Any], mode: str, routes: list[tuple[str, str
     }
 
 
+def _is_clef_endpoint(endpoint: str) -> bool:
+    """True when an endpoint is the Cloudflare Clef run route.
+
+    Detected from the endpoint rather than passed down, because a chain hop
+    reaches this function with only the endpoint it resolved, and Clef's id
+    mapping and envelope reader must still apply when Clef is one hop of a chain
+    rather than the whole route.
+    """
+    return endpoint.startswith(f"{CLEF_API_BASE}/")
+
+
+def _typed_answers(result: dict[str, Any], questions: dict[str, Any]) -> dict[str, Any]:
+    """Read a top level answers map under this repository's typed contract."""
+    result["answers"] = validate_answers(result.get("answers"), questions)
+    return result
+
+
+def _clef_chain_answers(questions: dict[str, Any], safe_questions: dict[str, Any],
+                        restore: Callable[[dict[str, Any]], dict[str, Any]]
+                        ) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    """A validator that unwraps a Clef envelope and maps question ids back.
+
+    Clef's id mapping has to run before validation, because the ids it receives
+    are the safe ones, and the reverse mapping has to run after, so the caller
+    gets its own ids back even when Clef was one hop of a chain.
+    """
+    def validate(result: dict[str, Any]) -> dict[str, Any]:
+        unwrapped = _clef_result(result)
+        unwrapped["answers"] = restore(validate_clef_answers(unwrapped["answers"], safe_questions))
+        return unwrapped
+
+    return validate
+
+
 def _request_once(state: Any, questions: dict[str, Any], api_key: str,
                   endpoint: str, model: str, timeout: float,
                   unwrap: Callable[[Any], dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -773,8 +1075,20 @@ def _request_once(state: Any, questions: dict[str, Any], api_key: str,
     wrap it in a REST envelope. Passing the route's own envelope reader here
     keeps the retry, header, and error handling identical across routes instead
     of forking a second copy of the loop.
+
+    A Clef endpoint is recognised from its shape, so a Clef hop inside a chain
+    gets the same envelope reading and the same question id mapping it gets when
+    Clef is the whole route, without the caller having to say so.
     """
-    payload = {"model": model, "state": state, "questions": questions}
+    clef = unwrap is not None or _is_clef_endpoint(endpoint)
+    if clef:
+        safe_questions, restore_ids = clef_question_ids(questions)
+        validate_laya_questions(safe_questions)
+        payload = {"model": model, "state": state, "questions": safe_questions}
+        validate = _clef_chain_answers(questions, safe_questions, restore_ids)
+    else:
+        payload = {"model": model, "state": state, "questions": questions}
+        validate = lambda result: _typed_answers(result, questions)
     body = json.dumps(payload).encode("utf-8")
     deadline = time.monotonic() + timeout
     last: Exception | None = None
@@ -793,9 +1107,7 @@ def _request_once(state: Any, questions: dict[str, Any], api_key: str,
             with urlopen(request, timeout=remaining) as response:
                 raw = json.loads(response.read().decode("utf-8"))
             result = unwrap(raw) if unwrap is not None else raw
-            result["answers"] = validate_clef_answers(result["answers"], questions) \
-                if unwrap is not None else validate_answers(result.get("answers"), questions)
-            return result
+            return validate(result)
         except HTTPError as exc:
             last = exc
             if exc.code not in _RETRYABLE or attempt == 2:

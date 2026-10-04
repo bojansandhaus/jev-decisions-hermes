@@ -20,7 +20,6 @@ Standalone installation provides the local gateway, CLI, and supporting Python m
 
 This installs the `jev-gateway` command. It evaluates JSON supplied by your runner; it does not launch another agent or connect to your services. There is no need to configure OpenRouter for local `decide` and `verify` calls.
 
-
 ### In the terminal: check policy, then evidence
 
 ```bash
@@ -44,7 +43,6 @@ printf '%s\n' '{"changed":true,"read_back":true,"evidence":true}' | jev-gateway 
 ```
 
 The result should contain `"verified": true` and `"next": "done"`. These inputs are deliberately simple fixtures. In a real integration, derive them from observed results. Setting them to `true` without checking anything defeats the purpose.
-
 
 ## Hermes tools and hooks
 
@@ -299,7 +297,12 @@ There are three ways to answer a typed question: a hosted provider, which is Jev
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `JEV_PROVIDER_MODE` | `openrouter` | `typesafe`, `openrouter`, `typesafe_then_openrouter`, `openrouter_then_typesafe`, `clef`, `laya`, or a local first chain: `laya_then_typesafe`, `laya_then_openrouter`, `laya_then_typesafe_openrouter`, `laya_then_openrouter_typesafe`. The DOGA aliases `clef_api`, `laya_local` and `laya_with_jev_fallback` are also accepted; see [DOGA selector aliases](#doga-selector-aliases). |
+| `JEV_PROVIDER_MODE` | `openrouter` | Any of the four canonical modes (`api_with_local_fallback`, `api_only`, `local_only`, `local_with_api_fallback`), any of the concrete mode names below, or an alias. See [the mode table](#the-four-canonical-modes) and the [alias table](#mode-aliases). |
+| `typesafe`, `openrouter`, `clef` | | A single hosted provider, no fallback. These are `api_only` on a pinned provider. |
+| `typesafe_then_openrouter`, `openrouter_then_typesafe` | | Two hosted providers. `clef` is never a member: it has no fallback and nothing appends it to a mode that does not name it. |
+| `laya_then_typesafe`, `laya_then_openrouter` | | The local slot first, one hosted provider behind it. |
+| `laya_then_typesafe_openrouter`, `laya_then_openrouter_typesafe` | | The local slot first, both hosted providers behind it. |
+| `typesafe_then_laya`, `openrouter_then_laya`, `clef_then_laya` | | One hosted provider first, the local slot behind it. These are what `api_with_local_fallback` routes with. New in 0.8.0. |
 | `TYPESAFE_API_KEY` | unset | Credential for the direct TypeSafe route. Required by the `typesafe` modes and by every `laya_then_*` mode that names TypeSafe. |
 | `OPENROUTER_API_KEY` | unset | Credential for the OpenRouter route. Required by the `openrouter` modes and by every `laya_then_*` mode that names OpenRouter. |
 | `CLOUDFLARE_API_TOKEN` | unset | Credential for the Cloudflare Clef route: a Cloudflare API token with **Account > Workers AI > Read**. Required by the `clef` mode and by the `clef_api` alias. |
@@ -308,13 +311,92 @@ There are three ways to answer a typed question: a hosted provider, which is Jev
 | `LAYA_API_KEY` | unset | Optional bearer for a `laya-serve` started with its own `LAYA_API_KEY`. The local hop needs no credential. |
 | `JEV_LAYA_BASE_URL` | `http://127.0.0.1:8123` | Local `laya-serve` base URL. Plain HTTP is accepted on `localhost`, `127.0.0.1`, and `::1`; any other host must be HTTPS. |
 | `JEV_LAYA_ENDPOINT_PATH` | `/v1/systemone` | The Decisions protocol path `laya-serve` publishes. |
-| `JEV_LAYA_MODEL` | `english` | The checkpoint the server serves. `english`, `multilingual`, and `typed-decisions` name a checkpoint directly. |
+| `JEV_LOCAL_MODEL` | `english` | Which local System One decision model answers. This is the generic name for the slot's engine, and it takes precedence over `JEV_LAYA_MODEL` when both are set. Any local model that speaks the same `/v1/systemone` contract fits; there is no allowlist of names. Rejected only when empty or whitespace, or when it carries a character that would corrupt a JSON string or a URL path segment. See [the local slot](#the-local-slot-is-a-slot-not-a-model). |
+| `JEV_LAYA_MODEL` | `english` | The pre-existing name for the same setting, kept for backwards compatibility. Used when `JEV_LOCAL_MODEL` is unset. `english`, `multilingual`, and `typed-decisions` name a `laya-serve` checkpoint directly. |
 
 `laya` on its own is a replacement for the hosted providers, never a member of them. It builds a chain of exactly one provider, no hosted mode ever selects it, and no mode appends it silently. The wire client omits the `Authorization` header entirely when no key is configured, so a server started without `LAYA_API_KEY` accepts the request unchanged; an empty bearer is wrong and is not sent. Laya is an external package you install yourself, authored by Convai Innovations under Apache-2.0 at [NandhaKishorM/laya](https://github.com/NandhaKishorM/laya); no Laya code ships in this repository.
 
+### The four canonical modes
+
+Four names cover every arrangement. Each says which side leads and whether the other side is a fallback, and none of them names a particular hosted provider or a particular local engine.
+
+| Mode | Leads | Fallback | Providers tried, in order |
+|---|---|---|---|
+| `api_with_local_fallback` | the hosted API | the local slot | the configured hosted provider, then `laya` |
+| `api_only` | the hosted API | none | the configured hosted provider |
+| `local_only` | the local slot | none | `laya` |
+| `local_with_api_fallback` | the local slot | the hosted API | `laya`, then the hosted providers |
+
+`api_only` and `local_only` are single provider routes. There is no fallback, no chain, and no cooldown list beyond the one provider, so a failure is **reported, never rerouted**. The other two are two provider chains and use the existing cooldown, trigger and breaker machinery unchanged.
+
+The hosted side is chosen by configuration rather than by the mode: whichever hosted credential is present selects it, with OpenRouter first, then direct TypeSafe, and Clef when it is the only hosted credential there is. That is why `api_only` resolves to `openrouter`, `typesafe` or `clef` rather than to one fixed provider, and why `api_with_local_fallback` becomes `<that provider>_then_laya`.
+
+The concrete mode names this repository has always accepted are **not** renamed and **not** deprecated. Each still selects the exact order it always named, so a configuration written for 0.7.0 routes identically in 0.8.0:
+
+| Concrete mode | Resolves to | Order |
+|---|---|---|
+| `openrouter` | `api_only` on OpenRouter | `openrouter` |
+| `typesafe` | `api_only` on TypeSafe | `typesafe` |
+| `clef` | `api_only` on Clef | `clef` |
+| `typesafe_then_openrouter` | two hosted providers | `typesafe`, `openrouter` |
+| `openrouter_then_typesafe` | two hosted providers | `openrouter`, `typesafe` |
+| `laya` | `local_only` | `laya` |
+| `laya_then_typesafe` | `local_with_api_fallback` | `laya`, `typesafe` |
+| `laya_then_openrouter` | `local_with_api_fallback` | `laya`, `openrouter` |
+| `laya_then_typesafe_openrouter` | `local_with_api_fallback` | `laya`, `typesafe`, `openrouter` |
+| `laya_then_openrouter_typesafe` | `local_with_api_fallback` | `laya`, `openrouter`, `typesafe` |
+| `typesafe_then_laya` | `api_with_local_fallback` | `typesafe`, `laya` |
+| `openrouter_then_laya` | `api_with_local_fallback` | `openrouter`, `laya` |
+| `clef_then_laya` | `api_with_local_fallback` on Clef | `clef`, `laya` |
+
+**The `<hosted>_then_laya` modes are new in 0.8.0** and are what `api_with_local_fallback` needs. Before this release a local server could only lead a chain, because a hosted failure was never a licence to call the local slot. It still cannot sit between two hosted hops: `("typesafe", "laya", "openrouter")` is refused, and a chain of `laya` alone is refused because the plain local mode is selected by its own name.
+
+**The privacy consequence is the reverse of `laya_then_*`.** A `laya_then_*` mode keeps the case state home while the local server answers and only sends it out when the local server fails. A `<hosted>_then_laya` mode does the opposite: the review goes to the hosted API first, and the local server is a backstop for when that route is unavailable. Choose which side you would rather depend on.
+
+### Mode aliases
+
+Every name below keeps working, so no deployed configuration breaks. Each resolves to a canonical mode **before** anything routes, so no alias string reaches a chain, a diagnostic, a log line, or a URL.
+
+| Alias | Resolves to | Order | Note |
+|---|---|---|---|
+| `laya_local` | `local_only` | `laya` | DOGA's name for the plain local mode. |
+| `laya_with_jev_fallback` | `local_with_api_fallback` | `laya`, `openrouter`, `typesafe` | DOGA's name. Both hosted providers, OpenRouter first. |
+| `clef_api` | `api_only` on Clef | `clef` | Clef alone, deliberately: a Clef failure is not a licence to call a second classifier. |
+| `jev_api` | `api_only` | by credential | The hosted side resolves by credential, as it always has. |
+| `clef_with_local_fallback` | `api_with_local_fallback` | `clef`, `laya` | Clef as the hosted side with the local slot behind it. |
+| `laya_then_hosted` | `local_with_api_fallback` | `laya`, `openrouter`, `typesafe` | Another spelling of the local first chain. |
+
+`resolve_mode` stays case insensitive and still fails closed for an unknown name, with an error that lists every accepted value. `MODE_ALIASES` and `CANONICAL_MODES` are the whole mapping; nothing is inferred from an alias name at request time.
+
+### The local slot is a slot, not a model
+
+`laya` selects the local slot. What answers inside that slot is chosen by `JEV_LOCAL_MODEL`, so **Laya is interchangeable with any other local System One decision model by configuration alone**: a different local model is one variable, with no new provider name, no new mode, and no code change.
+
+The value is the engine or checkpoint name the request asks the local server for. There is deliberately **no allowlist of model names**, because an engine nobody has heard of must work without a code change. Two things are refused instead:
+
+- an empty or whitespace-only value, which is a mistake worth reporting rather than silently covering over with the default, and
+- a value carrying a character that would corrupt the request, because the name is interpolated into a JSON string and may become a URL path segment: a quote, a backslash, a control character, a `/`, a `?`, a `#`, a `%`, or anything else in that class.
+
+A rejection names the setting and the reason. It never echoes the value back, and it happens before any socket is opened.
+
+Local models known to fit the same `/v1/systemone` contract:
+
+| Engine name | Notes |
+|---|---|
+| `laya` | Convai Innovations; a System One decision model with open weights, run locally. `laya-multilingual` and `laya-typed-decisions` are engine names of the same project. The default server is a `laya-serve`. |
+| `kev` | Open weights, also published as `kev-0.8b`. An open-weight family from 0.8B to 27B on Qwen3.5 and Qwen3.8 bases that serves the same `/v1/systemone` request shape as TypeSafe's API. |
+| `tev1` | Together AI's open-weight Qwen3.5-based System One decision model; `Tev1-4B` and `Tev1-0.8B` checkpoints. See [togethercomputer/tev1](https://github.com/togethercomputer/tev1). |
+| `jeff-qwen3.5-0.8b`, `jeff-gemma4-e2b` | Further System One engines on the same contract. |
+
+**The interchangeability claim is sourced, not asserted.** [chaitin/Decis](https://github.com/chaitin/Decis) is a self hosted server that speaks this Jev compatible `/v1/systemone` endpoint and serves more than one engine, one Docker image per engine, where repointing `base_url` is the whole migration. That is what makes Laya a slot rather than a binding.
+
+**The default request is unchanged.** `JEV_LOCAL_MODEL` defaults to `english`, which is the checkpoint `laya-serve` serves by default and the only one this repository has ever called. A default configuration sends byte for byte the request it always sent. `JEV_LAYA_MODEL` still works and is used when `JEV_LOCAL_MODEL` is unset; when both are set, `JEV_LOCAL_MODEL` wins, because it is the name that is not tied to one model.
+
+`local_model` is never a mode alias and never a member of a fallback order. An engine name is not a route: `JEV_PROVIDER_MODE=kev` is rejected, and `("kev",)` is rejected as a chain.
+
 ### The Cloudflare Clef route
 
-`clef` is a hosted decision model served by Cloudflare Workers AI. It sits beside Jev over TypeSafe or OpenRouter, not inside their chain: one provider name, one checkpoint setting, and no fallback.
+`clef` is a hosted System One decision model served by Cloudflare Workers AI. It sits beside Jev over TypeSafe or OpenRouter, not inside their chain: one provider name, one checkpoint setting, and no fallback.
 
 | | |
 |---|---|
@@ -331,7 +413,7 @@ There are three ways to answer a typed question: a hosted provider, which is Jev
 
 **Both credentials are checked before any socket is opened.** A missing `CLOUDFLARE_API_TOKEN` or `CLOUDFLARE_ACCOUNT_ID` is a selection error that names the variable, and both missing names are reported together, so a first run needs one fix rather than two. The account id is validated as 32 lowercase hex characters: it is configuration rather than a secret, but it is interpolated into a URL, so a value carrying `../` or a slash would rewrite which endpoint the request reaches and is refused before anything is sent.
 
-**Clef has no fallback, deliberately.** A Clef failure is a failure of this route, not permission to call a second classifier. There is no `clef_then_*` mode, no `laya_then_clef` mode, and nothing appends Clef to a mode that does not name it. A failed review is an unavailable review, and the host's conservative fallback applies.
+**Clef alone has no fallback, deliberately.** A Clef failure is a failure of this route, not permission to call a second classifier, and nothing appends Clef to a mode that does not name it. There is no `laya_then_clef` mode and no hosted-to-hosted Clef chain. The one opt in exception is `clef_then_laya`, reachable as `clef_with_local_fallback`, where you have asked by name for the local slot to back Clef up; there the fallback is the other side of the same contract rather than a second classifier. In every other case a failed review is an unavailable review, and the host's conservative fallback applies.
 
 **Both response envelopes are accepted.** Cloudflare serves the model output directly from the run endpoint as `{"model", "answers", "usage"}`, and its general REST surface wraps that in `{"success": true, "result": {...}}`. The route prefers a top-level `answers` and falls back to `result.answers`. A `{"success": false}` envelope is refused with Cloudflare's own error codes in the message, because they identify what went wrong where a generic parse failure would not.
 
@@ -354,7 +436,7 @@ The four `laya_then_*` modes are the explicit opt in that the first two arrangem
 
 Laya always answers first, from the local server. A local attempt that fails falls through to the named hosted provider, and if that fails too, to the next one the mode names. Three rules hold, and each one is a test:
 
-- **Laya may lead a chain but never follow one.** A chain that puts `laya` after a hosted provider is rejected, and a chain of `laya` alone is rejected because the plain local mode is selected by its own name. `laya` is the only local provider, and it is never appended to a mode that does not name it.
+- **Laya leads this chain, and in this chain it may only lead.** A chain that puts `laya` between two hosted hops is rejected, and a chain of `laya` alone is rejected because the plain local mode is selected by its own name. `laya` is the only local provider, and it is never appended to a mode that does not name it. As of 0.8.0 a chain may also *end* in `laya`, which is the `<hosted>_then_laya` mode; that is a different chain, described [above](#the-four-canonical-modes).
 - **A named hosted provider needs its key before the local review is sent.** A missing `TYPESAFE_API_KEY` or `OPENROUTER_API_KEY` is a selection error raised before any hop runs, naming the variable, rather than a failure discovered after the case state was already on the local server. That is why the mode can be trusted to fall through: the hop it falls through to can authenticate.
 - **The answer says which provider answered.** A `laya_then_*` result carries a `provider_routing` block: `provider` is the hop that answered, `provider_order` is the chain, `fallback_used` is true when the answering hop was a fallback, and `attempts` lists each earlier hop with its error. The hosted modes and the plain local mode return no such block, so their existing response shape is unchanged.
 
@@ -364,22 +446,22 @@ The question shapes and the score scale are the local server's, because the loca
 
 ### DOGA selector aliases
 
-The DOGA fork names four arrangements `jev_api`, `clef_api`, `laya_local`, and `laya_with_jev_fallback`. Three of those names are accepted here as aliases of the canonical modes, so a setting written for DOGA works unchanged. The mapping is a table in `jev_client.MODE_ALIASES`, and it is the whole mapping: nothing is inferred from the alias name at request time.
+The DOGA fork names four arrangements `jev_api`, `clef_api`, `laya_local`, and `laya_with_jev_fallback`. **As of 0.8.0 all four are accepted** as aliases of the canonical modes, so a setting written for DOGA works unchanged. `jev_api` was refused before this release; it now resolves to `api_only` with the hosted side chosen by credential, which is what the name always meant. The mapping is a table in `jev_client.MODE_ALIASES`, and it is the whole mapping: nothing is inferred from the alias name at request time. The complete alias table, including the two names the shared contract adds, is [above](#mode-aliases).
 
 | DOGA name | Accepted here? | Resolves to | Providers tried, in order |
 |---|---|---|---|
-| `jev_api` | No, and it needs no alias | `openrouter` by default, or `typesafe` | The hosted Jev arrangement this repository already names four ways |
+| `jev_api` | Yes, new in 0.8.0 | `api_only` | `openrouter` or `typesafe`, by credential |
 | `clef_api` | Yes | `clef` | `clef` |
 | `laya_local` | Yes | `laya` | `laya` |
 | `laya_with_jev_fallback` | Yes | `laya_then_openrouter_typesafe` | `laya`, `openrouter`, then `typesafe` |
 
-`clef_api` selects Clef **alone, with no fallback at all**. That is the point of the alias: DOGA's Clef route is a hosted route of its own, so a Clef failure is a failure of that route rather than a licence to call a second classifier. The alias needs `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`, and a missing one fails before any request, naming the variable. No mode silently routes to Clef: a mode that does not name Clef never reaches it, and there is no `clef_then_*` or `laya_then_clef` mode to guess at.
+`clef_api` selects Clef **alone, with no fallback at all**. That is the point of the alias: DOGA's Clef route is a hosted route of its own, so a Clef failure is a failure of that route rather than a licence to call a second classifier. The alias needs `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`, and a missing one fails before any request, naming the variable. No mode silently routes to Clef: a mode that does not name Clef never reaches it. The one mode that pairs the two sides is `clef_then_laya`, which is reached only through `clef_with_local_fallback` or by naming it directly, and there the local slot is the fallback rather than a second classifier.
 
 `laya_local` is the plain local mode under DOGA's name: one provider, no hosted hop, and no egress. `laya_with_jev_fallback` is the local first chain that names **both** hosted Jev providers, and the order is OpenRouter first and direct TypeSafe second. That order is not arbitrary: DOGA's own Jev route tries OpenRouter first and falls back to direct TypeSafe, and `openrouter` is this repository's default hosted provider. Naming both providers also means the chain is not weaker than DOGA's fallback, which can reach either one. A `laya_with_jev_fallback` selection therefore needs both `OPENROUTER_API_KEY` and `TYPESAFE_API_KEY`, and a missing one fails at selection naming the variable.
 
-`jev_api` is not an accepted value, because the hosted Jev arrangement it names already has four explicit mode names here. To match DOGA's Jev route exactly, including its OpenRouter-first order, set `JEV_PROVIDER_MODE=openrouter_then_typesafe`.
+`jev_api` resolves to `api_only`, so the hosted side follows the credential present: `openrouter` when `OPENROUTER_API_KEY` is available, `typesafe` when `TYPESAFE_API_KEY` is, and Clef when it is the only hosted credential there is. To pin the OpenRouter-first order that DOGA's own Jev route uses, set `JEV_PROVIDER_MODE=openrouter_then_typesafe` instead; that is the two-provider chain rather than the single provider `api_only` names.
 
-An alias resolves to its canonical mode before anything routes, so it behaves identically to the mode it names: the same provider order, the same required keys, the same `provider_routing` block, and the same error. Anything that is not one of the ten canonical modes or the three aliases is rejected with an error listing every accepted value.
+An alias resolves to its canonical mode before anything routes, so it behaves identically to the mode it names: the same provider order, the same required keys, the same `provider_routing` block, and the same error. Anything outside the accepted set is rejected with an error listing every accepted value; there are thirteen concrete modes, four canonical modes and six aliases, so `JEV_PROVIDER_MODE` accepts twenty-three names.
 
 ### The consecutive failure breaker
 
@@ -441,7 +523,6 @@ assert check["next"] == "read_back"
 The Python functions and CLI can sit behind an MCP tool or HTTP service you build. This repository does not ship a universal MCP server or native adapters for every agent framework. The Hermes registration code stays specific to Hermes; your own provider can supply semantic judgment while the local gateway handles explicit policy state.
 
 See [the integration guide](integrations.md) for the interface contract and operational details.
-
 
 ## Local storage
 
