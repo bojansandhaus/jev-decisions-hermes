@@ -370,7 +370,7 @@ Every name below keeps working, so no deployed configuration breaks. Each resolv
 
 ### The local slot is a slot, not a model
 
-`laya` selects the local slot. What answers inside that slot is chosen by `JEV_LOCAL_MODEL`, so **Laya is interchangeable with any other local System One decision model by configuration alone**: a different local model is one variable, with no new provider name, no new mode, and no code change.
+`laya` selects the local slot, and the slot takes **Laya or other pre-deterministic routing models**. What answers inside it is chosen by `JEV_LOCAL_MODEL`, so **Laya is interchangeable with any other local System One decision model by configuration alone**: a different local model is one variable, with no new provider name, no new mode, and no code change.
 
 The value is the engine or checkpoint name the request asks the local server for. There is deliberately **no allowlist of model names**, because an engine nobody has heard of must work without a code change. Two things are refused instead:
 
@@ -379,20 +379,18 @@ The value is the engine or checkpoint name the request asks the local server for
 
 A rejection names the setting and the reason. It never echoes the value back, and it happens before any socket is opened.
 
-Local models known to fit the same `/v1/systemone` contract:
+Local models known to fit the same `/v1/systemone` contract. Only the engine names this repository documents are listed; any other local model your server answers to fits the slot the same way:
 
 | Engine name | Notes |
 |---|---|
 | `laya` | Convai Innovations; a System One decision model with open weights, run locally. `laya-multilingual` and `laya-typed-decisions` are engine names of the same project. The default server is a `laya-serve`. |
-| `kev` | Open weights, also published as `kev-0.8b`. An open-weight family from 0.8B to 27B on Qwen3.5 and Qwen3.8 bases that serves the same `/v1/systemone` request shape as TypeSafe's API. |
-| `tev1` | Together AI's open-weight Qwen3.5-based System One decision model; `Tev1-4B` and `Tev1-0.8B` checkpoints. See [togethercomputer/tev1](https://github.com/togethercomputer/tev1). |
-| `jeff-qwen3.5-0.8b`, `jeff-gemma4-e2b` | Further System One engines on the same contract. |
+| `english`, `multilingual`, `typed-decisions` | Checkpoint names the `laya` server answers to. `english` is the default this repository sends. |
 
 **The interchangeability claim is sourced, not asserted.** [chaitin/Decis](https://github.com/chaitin/Decis) is a self hosted server that speaks this Jev compatible `/v1/systemone` endpoint and serves more than one engine, one Docker image per engine, where repointing `base_url` is the whole migration. That is what makes Laya a slot rather than a binding.
 
 **The default request is unchanged.** `JEV_LOCAL_MODEL` defaults to `english`, which is the checkpoint `laya-serve` serves by default and the only one this repository has ever called. A default configuration sends byte for byte the request it always sent. `JEV_LAYA_MODEL` still works and is used when `JEV_LOCAL_MODEL` is unset; when both are set, `JEV_LOCAL_MODEL` wins, because it is the name that is not tied to one model.
 
-`local_model` is never a mode alias and never a member of a fallback order. An engine name is not a route: `JEV_PROVIDER_MODE=kev` is rejected, and `("kev",)` is rejected as a chain.
+`local_model` is never a mode alias and never a member of a fallback order. An engine name is not a route: `JEV_PROVIDER_MODE=your-local-engine` is rejected, and `("your-local-engine",)` is rejected as a chain.
 
 ### The Cloudflare Clef route
 

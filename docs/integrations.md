@@ -75,10 +75,10 @@ To swap the engine, change one variable:
 ```bash
 JEV_PROVIDER_MODE=local_only
 JEV_LAYA_BASE_URL=http://127.0.0.1:8123
-JEV_LOCAL_MODEL=tev1
+JEV_LOCAL_MODEL=your-local-engine
 ```
 
-Engines known to answer the same `/v1/systemone` contract: `laya` with its `multilingual` and `typed-decisions` engine names, `kev`, `tev1` (Together AI's open-weight System One decision model, `Tev1-4B` and `Tev1-0.8B`), and the `jeff` family such as `jeff-qwen3.5-0.8b` and `jeff-gemma4-e2b`. There is deliberately **no allowlist**: an engine nobody has heard of works the same way, because the whole point is that adding a model is a configuration change rather than a code change.
+The slot takes **Laya or other pre-deterministic routing models**. `laya` and its `multilingual` and `typed-decisions` engine names are the ones documented here, and any other engine your server answers to fits it the same way. There is deliberately **no allowlist**: an engine nobody has heard of works the same way, because the whole point is that adding a model is a configuration change rather than a code change.
 
 ### A worked example: `chaitin/Decis`
 

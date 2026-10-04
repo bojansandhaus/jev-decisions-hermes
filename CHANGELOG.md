@@ -11,7 +11,7 @@ Implements the shared four mode provider contract and turns the local `laya` pro
 ### Added
 
 - **Four canonical modes**: `api_with_local_fallback`, `api_only`, `local_only`, `local_with_api_fallback`. Each names which side leads and whether the other side is a fallback. `api_only` and `local_only` are single provider routes whose failures are reported, never rerouted.
-- **`JEV_LOCAL_MODEL`**: selects which local System One decision model answers inside the `laya` slot. Defaults to `english`, so a default configuration sends the request it always sent. There is no allowlist of model names: an engine nobody has heard of works by configuration alone. Only an empty or whitespace value, or one carrying a character that would corrupt a JSON string or a URL path segment, is refused.
+- **`JEV_LOCAL_MODEL`**: selects which engine answers inside the `laya` slot, which takes **Laya or other pre-deterministic routing models**; the engine is a local System One decision model. Defaults to `english`, so a default configuration sends the request it always sent. There is no allowlist of model names: an engine nobody has heard of works by configuration alone. Only an empty or whitespace value, or one carrying a character that would corrupt a JSON string or a URL path segment, is refused.
 - **Hosted first chains**: `typesafe_then_laya`, `openrouter_then_laya`, `clef_then_laya`. These are what `api_with_local_fallback` routes with, and they are the mirror of the existing `laya_then_*` local first chains.
 - **Three aliases**: `jev_api` (newly accepted, resolving to `api_only` with the hosted side chosen by credential), `clef_with_local_fallback`, and `laya_then_hosted`.
 
@@ -21,6 +21,7 @@ Implements the shared four mode provider contract and turns the local `laya` pro
 - `uses_local_hop` reports true whenever a chain contains the local slot, so a hosted first chain gets the longer local budget.
 - Clef's question id mapping and response envelope reader are applied wherever a Clef endpoint appears, including inside a chain, by recognising the endpoint rather than forking a second code path.
 - Every statement that Clef or the local slot has "no fallback" is qualified, because `clef_then_laya` makes the unqualified claim false.
+- The public documentation now describes the local routes as **Laya or other pre-deterministic routing models**, and the vendor-specific engine names it previously listed are no longer published. The setting itself is unchanged: `JEV_LOCAL_MODEL` is still a free-form engine name and still accepts any local engine.
 
 ### Compatibility
 
