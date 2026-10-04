@@ -27,7 +27,33 @@ The default Hermes adapter sends this shape to OpenRouter's Decisions API:
 
 Keep `state` small and redacted. Put definitions in `criteria`, not in a free form prompt. Keep the question count bounded. Treat the returned answer as a recommendation.
 
-Three ways to answer that call, and you pick one: Jev over a TypeSafe or OpenRouter key, Laya locally with no key, or an opt in `laya_then_*` chain that answers locally first and falls through to the named hosted provider. A local `laya-serve` process publishes the same `POST /v1/systemone` shape, so the payload above is unchanged except that `model` names a Laya checkpoint instead of a Jev model and no `Authorization` header is sent. With plain `laya`, `state` never leaves your machine. In a `laya_then_*` mode, a local attempt that fails sends the case state to the named hosted API: that fallback is the point of the mode, and it stops after three consecutive local failures in one process, after which the local error is raised instead of a hosted request. The DOGA names `laya_local` and `laya_with_jev_fallback` are accepted as aliases for `laya` and `laya_then_openrouter_typesafe`. The result carries a `provider_routing` block naming the provider that answered and whether a fallback happened. See [provider settings and the local route](reference.md#provider-settings-and-the-local-route).
+Four hosted and local ways to answer that call, and you pick one: Jev over a TypeSafe or OpenRouter key, Clef at Cloudflare Workers AI, Laya locally with no key, or an opt in `laya_then_*` chain that answers locally first and falls through to the named hosted provider. A local `laya-serve` process publishes the same `POST /v1/systemone` shape, so the payload above is unchanged except that `model` names a Laya checkpoint instead of a Jev model and no `Authorization` header is sent. With plain `laya`, `state` never leaves your machine. In a `laya_then_*` mode, a local attempt that fails sends the case state to the named hosted API: that fallback is the point of the mode, and it stops after three consecutive local failures in one process, after which the local error is raised instead of a hosted request. The DOGA names `laya_local`, `laya_with_jev_fallback` and `clef_api` are accepted as aliases for `laya`, `laya_then_openrouter_typesafe` and `clef`. The result carries a `provider_routing` block naming the provider that answered and whether a fallback happened. See [provider settings and the local route](reference.md#provider-settings-and-the-local-route).
+
+## The Clef route
+
+The `clef` provider sends the same `state` and `questions` shape to Cloudflare Workers AI, so nothing about your adapter changes. What is different is the endpoint, the credentials, and one stricter rule on question ids:
+
+```json
+{
+  "model": "clef",
+  "state": {"...": "bounded state"},
+  "questions": {
+    "candidate:aaa": {
+      "type": "noul",
+      "instructions": "Is the selected candidate answerable from the supplied state?",
+      "criteria": {"true": "It is", "false": "It is not"}
+    }
+  }
+}
+```
+
+- **Endpoint.** `POST https://api.cloudflare.com/client/v4/accounts/<CLOUDFLARE_ACCOUNT_ID>/ai/run/@cf/cloudflare/clef`, with the same path under `clef-flash` for that checkpoint.
+- **Credentials.** `CLOUDFLARE_ACCOUNT_ID` scopes the endpoint and `CLOUDFLARE_API_TOKEN` authorises the call. The account id is configuration rather than a secret, but it appears in the URL; the token needs **Account > Workers AI > Read** and is sent as `Authorization: Bearer`. Both are checked before the request is sent, and a missing one fails naming the variable.
+- **Question ids.** Clef accepts letters, digits, `_`, `.` and `-` only, up to 100 characters, and at most 64 questions per request. The `candidate:aaa` form above has a colon, which Clef refuses, so the plugin rewrites it on the way out and rewrites the answers back on the way in. Your adapter sees its own ids.
+- **Answers.** The same `noul`, `choice` and `score` contract as the other routes, including a `score` read on the legend index scale its ordered `criteria` define.
+- **No fallback.** Clef never falls back to another provider. A Clef failure is an unavailable review; apply your host's conservative fallback rather than assuming an answer exists.
+
+Egress is the point of the route, exactly as it is for any hosted provider: `state` leaves your machine and reaches Cloudflare. Redact it first, on the same terms as the other routes. A failure logs only the provider name and the exception class, never the state and never the credential.
 
 ## Adapter contract for another agent
 

@@ -111,13 +111,17 @@ def test_the_local_mode_is_exactly_one_provider():
 
 @pytest.mark.parametrize("mode", sorted(jev_client.HOSTED_PROVIDER_MODES))
 def test_no_hosted_mode_selects_the_local_route_on_its_own(mode):
-    assert jev_client.provider_order(mode) in (
-        ("typesafe",),
-        ("openrouter",),
-        ("typesafe", "openrouter"),
-        ("openrouter", "typesafe"),
-    )
-    assert "laya" not in jev_client.provider_order(mode)
+    """Every hosted mode is built only from hosted providers.
+
+    The order is not enumerated here: `clef` was added after this test was
+    written, and an allowlist of orders would have to be edited by every future
+    provider. Asserting the property instead means a new hosted provider is
+    covered the day it is added, without touching this test.
+    """
+    order = jev_client.provider_order(mode)
+    assert order, "a hosted mode names at least one provider"
+    assert "laya" not in order
+    assert all(name in jev_client.HOSTED_PROVIDER_MODES for name in order)
 
 
 def test_the_local_route_is_rejected_as_a_fallback_member():

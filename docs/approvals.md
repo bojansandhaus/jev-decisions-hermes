@@ -4,7 +4,9 @@ Jev Decisions 0.2.0 includes an approval only companion provider and an advisory
 
 ## Provider selection
 
-Model reviews and smart approval review can use a hosted Jev provider, a local Laya server, or a local first chain that falls through to a hosted provider. Set `JEV_PROVIDER_MODE` to one of `typesafe`, `openrouter`, `typesafe_then_openrouter`, `openrouter_then_typesafe`, `laya`, `laya_then_typesafe`, `laya_then_openrouter`, `laya_then_typesafe_openrouter`, or `laya_then_openrouter_typesafe`. The DOGA names `laya_local` and `laya_with_jev_fallback` are accepted aliases for `laya` and `laya_then_openrouter_typesafe`. The default is `openrouter` for backward compatibility.
+Model reviews and smart approval review can use a hosted Jev provider, the hosted Cloudflare Clef provider, a local Laya server, or a local first chain that falls through to a hosted provider. Set `JEV_PROVIDER_MODE` to one of `typesafe`, `openrouter`, `typesafe_then_openrouter`, `openrouter_then_typesafe`, `clef`, `laya`, `laya_then_typesafe`, `laya_then_openrouter`, `laya_then_typesafe_openrouter`, or `laya_then_openrouter_typesafe`. The DOGA names `laya_local`, `laya_with_jev_fallback` and `clef_api` are accepted aliases for `laya`, `laya_then_openrouter_typesafe` and `clef`. The default is `openrouter` for backward compatibility.
+
+`clef` is a hosted route of its own with no fallback. It needs `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN`, both checked before the command state is sent, and a missing one fails naming the variable. Its `clef-flash` checkpoint is selected with `JEV_CLEF_MODEL`. Because a Clef failure is not a licence to call a second classifier, the advisory review is an unavailable review and escalates exactly as any other provider failure does.
 
 The four hosted modes run Jev over a hosted API key. Store `TYPESAFE_API_KEY` and `OPENROUTER_API_KEY` through the Hermes secret manager or the profile environment. Never put a key in `config.yaml`, a command argument, a journal, or this repository. The direct TypeSafe endpoint is `https://api.typesafe.ai/v1/systemone` with model `jev-1.13.0`. The OpenRouter endpoint is `https://openrouter.ai/api/alpha/decisions` with model `typesafe/jev-1.13`. A fallback is attempted only after the selected primary route fails.
 
@@ -14,7 +16,7 @@ The `laya_then_*` modes are the explicit opt in that puts Laya first and names t
 
 The fallback is bounded by a consecutive failure breaker. The first three local failures in a row in one process may fall through to the named hosted provider; the fourth, and every one after it, re-raises the local error and makes no hosted request at all. Any local answer that passes validation resets the count to zero, and the count is process state, so a restart starts it clean. Because the count tracks local failures only, it bounds egress identically in all four `laya_then_*` modes whichever hosted provider a mode names. It bounds repeated remote egress after local errors; it cannot detect a valid yet incorrect local judgment, which is returned as a healthy local answer. A blocked review is still an unavailable review, so the gate escalates rather than approving.
 
-A provider outage, missing key, timeout, malformed response, invalid number, unknown enum, or incomplete answer is an unavailable review and must escalate. It never silently approves. The measured limits of the local checkpoint are in [the reference](reference.md#provider-settings-and-the-local-route); do not read a local score as a hosted score without checking the scale there.
+A provider outage, missing key, timeout, malformed response, invalid number, unknown enum, or incomplete answer is an unavailable review and must escalate. That includes every Cloudflare error code the `clef` route surfaces. It never silently approves. The measured limits of the local checkpoint are in [the reference](reference.md#provider-settings-and-the-local-route); do not read a local score as a hosted score without checking the scale there.
 
 ## Advisory workflow
 
@@ -30,6 +32,6 @@ Keep the existing Hermes approval settings in force. Before selecting the provid
 
 ## Privacy and attribution
 
-Commands are bounded and redacted before provider egress where the integration can do so. Local records contain metadata and hashes rather than raw command text. Review payloads still leave the machine for OpenRouter, so use synthetic cases when testing. With a `laya_then_*` mode the payload goes to the local server first and to the named hosted API only when that local attempt fails; the plain `laya` mode sends it nowhere but loopback.
+Commands are bounded and redacted before provider egress where the integration can do so. Local records contain metadata and hashes rather than raw command text. Review payloads still leave the machine for OpenRouter, or for Cloudflare on the `clef` route, so use synthetic cases when testing. With a `laya_then_*` mode the payload goes to the local server first and to the named hosted API only when that local attempt fails; the plain `laya` mode sends it nowhere but loopback.
 
 The companion provider is adapted from [anpicasso/hermes-jev-approvals](https://github.com/anpicasso/hermes-jev-approvals), authored by anpicasso. See `THIRD_PARTY_NOTICES.md` for the applicable MIT notice. The surrounding Jev Decisions plugin remains Copyright (c) 2026 Bojan Sandhaus under MIT.

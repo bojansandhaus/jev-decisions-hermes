@@ -295,19 +295,51 @@ Returned probabilities and confidence describe the model's judgment. They do not
 
 ## Provider settings and the local route
 
-There are three ways to answer a typed question: Jev over a hosted API key, Laya locally with no key, or an opt in chain that starts at the local server and falls through to a hosted provider. You pick one with `JEV_PROVIDER_MODE`.
+There are three ways to answer a typed question: a hosted provider, which is Jev over a TypeSafe or OpenRouter key or Clef at Cloudflare Workers AI; Laya locally with no key; or an opt in chain that starts at the local server and falls through to a hosted provider. You pick one with `JEV_PROVIDER_MODE`.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `JEV_PROVIDER_MODE` | `openrouter` | `typesafe`, `openrouter`, `typesafe_then_openrouter`, `openrouter_then_typesafe`, `laya`, or a local first chain: `laya_then_typesafe`, `laya_then_openrouter`, `laya_then_typesafe_openrouter`, `laya_then_openrouter_typesafe`. The DOGA aliases `laya_local` and `laya_with_jev_fallback` are also accepted; see [DOGA selector aliases](#doga-selector-aliases). |
+| `JEV_PROVIDER_MODE` | `openrouter` | `typesafe`, `openrouter`, `typesafe_then_openrouter`, `openrouter_then_typesafe`, `clef`, `laya`, or a local first chain: `laya_then_typesafe`, `laya_then_openrouter`, `laya_then_typesafe_openrouter`, `laya_then_openrouter_typesafe`. The DOGA aliases `clef_api`, `laya_local` and `laya_with_jev_fallback` are also accepted; see [DOGA selector aliases](#doga-selector-aliases). |
 | `TYPESAFE_API_KEY` | unset | Credential for the direct TypeSafe route. Required by the `typesafe` modes and by every `laya_then_*` mode that names TypeSafe. |
 | `OPENROUTER_API_KEY` | unset | Credential for the OpenRouter route. Required by the `openrouter` modes and by every `laya_then_*` mode that names OpenRouter. |
+| `CLOUDFLARE_API_TOKEN` | unset | Credential for the Cloudflare Clef route: a Cloudflare API token with **Account > Workers AI > Read**. Required by the `clef` mode and by the `clef_api` alias. |
+| `CLOUDFLARE_ACCOUNT_ID` | unset | The Cloudflare account the run endpoint is scoped to, 32 lowercase hex characters. Configuration rather than a secret, but it does appear in the request URL. Required by the `clef` mode and by the `clef_api` alias. |
+| `JEV_CLEF_MODEL` | `clef` | The Clef checkpoint: `clef` or `clef-flash`. A checkpoint of the one Clef provider, not a second provider. |
 | `LAYA_API_KEY` | unset | Optional bearer for a `laya-serve` started with its own `LAYA_API_KEY`. The local hop needs no credential. |
 | `JEV_LAYA_BASE_URL` | `http://127.0.0.1:8123` | Local `laya-serve` base URL. Plain HTTP is accepted on `localhost`, `127.0.0.1`, and `::1`; any other host must be HTTPS. |
 | `JEV_LAYA_ENDPOINT_PATH` | `/v1/systemone` | The Decisions protocol path `laya-serve` publishes. |
 | `JEV_LAYA_MODEL` | `english` | The checkpoint the server serves. `english`, `multilingual`, and `typed-decisions` name a checkpoint directly. |
 
-`laya` on its own is a replacement for the hosted pair, never a member of it. It builds a chain of exactly one provider, no hosted mode ever selects it, and no mode appends it silently. The wire client omits the `Authorization` header entirely when no key is configured, so a server started without `LAYA_API_KEY` accepts the request unchanged; an empty bearer is wrong and is not sent. Laya is an external package you install yourself, authored by Convai Innovations under Apache-2.0 at [NandhaKishorM/laya](https://github.com/NandhaKishorM/laya); no Laya code ships in this repository.
+`laya` on its own is a replacement for the hosted providers, never a member of them. It builds a chain of exactly one provider, no hosted mode ever selects it, and no mode appends it silently. The wire client omits the `Authorization` header entirely when no key is configured, so a server started without `LAYA_API_KEY` accepts the request unchanged; an empty bearer is wrong and is not sent. Laya is an external package you install yourself, authored by Convai Innovations under Apache-2.0 at [NandhaKishorM/laya](https://github.com/NandhaKishorM/laya); no Laya code ships in this repository.
+
+### The Cloudflare Clef route
+
+`clef` is a hosted decision model served by Cloudflare Workers AI. It sits beside Jev over TypeSafe or OpenRouter, not inside their chain: one provider name, one checkpoint setting, and no fallback.
+
+| | |
+|---|---|
+| Mode | `JEV_PROVIDER_MODE=clef`, or the DOGA alias `clef_api` |
+| Endpoint | `POST https://api.cloudflare.com/client/v4/accounts/<CLOUDFLARE_ACCOUNT_ID>/ai/run/@cf/cloudflare/clef` |
+| Body | `{"model": "clef", "state": <state>, "questions": <questions>}` |
+| Credential | `CLOUDFLARE_API_TOKEN`, a Cloudflare API token with **Account > Workers AI > Read**, sent as `Authorization: Bearer` |
+| Configuration | `CLOUDFLARE_ACCOUNT_ID`, the 32 character account id, and `JEV_CLEF_MODEL`, the checkpoint |
+| Checkpoints | `clef` (default) and [`clef-flash`](https://developers.cloudflare.com/workers-ai/models/clef-flash/), both at the `/ai/run/@cf/cloudflare/<model>` path |
+| Limits | 64 questions per request, 65536 token context window |
+| Source | [Clef](https://developers.cloudflare.com/workers-ai/models/clef/) |
+
+**The checkpoint is a setting, not a provider.** `clef` and `clef-flash` answer the same typed questions, so `JEV_CLEF_MODEL` chooses between them and there is still exactly one provider. `clef-flash` is rejected if you set it as `JEV_PROVIDER_MODE`, because a mode name is a route and a checkpoint is not. An unrecognised `JEV_CLEF_MODEL` fails naming the accepted values rather than calling a checkpoint that does not exist.
+
+**Both credentials are checked before any socket is opened.** A missing `CLOUDFLARE_API_TOKEN` or `CLOUDFLARE_ACCOUNT_ID` is a selection error that names the variable, and both missing names are reported together, so a first run needs one fix rather than two. The account id is validated as 32 lowercase hex characters: it is configuration rather than a secret, but it is interpolated into a URL, so a value carrying `../` or a slash would rewrite which endpoint the request reaches and is refused before anything is sent.
+
+**Clef has no fallback, deliberately.** A Clef failure is a failure of this route, not permission to call a second classifier. There is no `clef_then_*` mode, no `laya_then_clef` mode, and nothing appends Clef to a mode that does not name it. A failed review is an unavailable review, and the host's conservative fallback applies.
+
+**Both response envelopes are accepted.** Cloudflare serves the model output directly from the run endpoint as `{"model", "answers", "usage"}`, and its general REST surface wraps that in `{"success": true, "result": {...}}`. The route prefers a top-level `answers` and falls back to `result.answers`. A `{"success": false}` envelope is refused with Cloudflare's own error codes in the message, because they identify what went wrong where a generic parse failure would not.
+
+**The answer contract is the one this repository already had.** Clef names its three question types `noul`, `choice` and `score`, exactly as the System One API this client already speaks, so answers go through the same `validate_answers` and the same score legend index check as the other routes. A `score` question must send `criteria` as an ordered list of level descriptions, and an answer outside `0..len(criteria)-1`, or a `legend` that contradicts those levels, is rejected. A `noul` probability and a `confidence` outside `0..1` are rejected, and so is a `choice` that is not one of the question's own criteria.
+
+**Question ids are mapped, and mapped back.** Clef accepts letters, digits, `_`, `.` and `-` in a question id, up to 100 characters. This repository builds ids such as `candidate:aaa` and `hook:name`, whose colon Clef refuses, so an id is rewritten before the request (`candidate:aaa` becomes `candidate_aaa`) and the answers are rewritten back afterwards. A caller never sees a renamed question, and an id Clef already accepts is sent untouched. An id too long to send is truncated and gains a short digest of the original, so truncation cannot make two questions collide. A request with more than 64 questions is refused before it is sent; that limit is Clef's and applies only to the route that names it.
+
+**Privacy and log hygiene.** A `clef` review sends the bounded `state` and the questions to Cloudflare, which is egress in the same sense as any other hosted route. The credential is sent only as an `Authorization` header and is never logged, and neither is the reviewed state: a Clef failure logs only the provider name and the exception class, never the exception message, matching the guarantee the other routes make. See `THIRD_PARTY_NOTICES.md` for Clef's licensing and provenance.
 
 ### Local first chains: Laya primary with a hosted fallback
 
@@ -332,19 +364,22 @@ The question shapes and the score scale are the local server's, because the loca
 
 ### DOGA selector aliases
 
-The DOGA fork names the same three arrangements `jev_api`, `laya_local`, and `laya_with_jev_fallback`. Two of those names are accepted here as aliases of the canonical modes, so a setting written for DOGA works unchanged. The mapping is a table in `jev_client.MODE_ALIASES`, and it is the whole mapping: nothing is inferred from the alias name at request time.
+The DOGA fork names four arrangements `jev_api`, `clef_api`, `laya_local`, and `laya_with_jev_fallback`. Three of those names are accepted here as aliases of the canonical modes, so a setting written for DOGA works unchanged. The mapping is a table in `jev_client.MODE_ALIASES`, and it is the whole mapping: nothing is inferred from the alias name at request time.
 
 | DOGA name | Accepted here? | Resolves to | Providers tried, in order |
 |---|---|---|---|
-| `jev_api` | No, and it needs no alias | `openrouter` by default, or `typesafe` | The hosted arrangement this repository already names four ways |
+| `jev_api` | No, and it needs no alias | `openrouter` by default, or `typesafe` | The hosted Jev arrangement this repository already names four ways |
+| `clef_api` | Yes | `clef` | `clef` |
 | `laya_local` | Yes | `laya` | `laya` |
 | `laya_with_jev_fallback` | Yes | `laya_then_openrouter_typesafe` | `laya`, `openrouter`, then `typesafe` |
 
-`laya_local` is the plain local mode under DOGA's name: one provider, no hosted hop, and no egress. `laya_with_jev_fallback` is the local first chain that names **both** hosted providers, and the order is OpenRouter first and direct TypeSafe second. That order is not arbitrary: DOGA's own Jev route tries OpenRouter first and falls back to direct TypeSafe, and `openrouter` is this repository's default hosted provider. Naming both providers also means the chain is not weaker than DOGA's fallback, which can reach either one. A `laya_with_jev_fallback` selection therefore needs both `OPENROUTER_API_KEY` and `TYPESAFE_API_KEY`, and a missing one fails at selection naming the variable.
+`clef_api` selects Clef **alone, with no fallback at all**. That is the point of the alias: DOGA's Clef route is a hosted route of its own, so a Clef failure is a failure of that route rather than a licence to call a second classifier. The alias needs `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`, and a missing one fails before any request, naming the variable. No mode silently routes to Clef: a mode that does not name Clef never reaches it, and there is no `clef_then_*` or `laya_then_clef` mode to guess at.
 
-`jev_api` is not an accepted value, because the hosted arrangement it names already has four explicit mode names here. To match DOGA's Jev route exactly, including its OpenRouter-first order, set `JEV_PROVIDER_MODE=openrouter_then_typesafe`.
+`laya_local` is the plain local mode under DOGA's name: one provider, no hosted hop, and no egress. `laya_with_jev_fallback` is the local first chain that names **both** hosted Jev providers, and the order is OpenRouter first and direct TypeSafe second. That order is not arbitrary: DOGA's own Jev route tries OpenRouter first and falls back to direct TypeSafe, and `openrouter` is this repository's default hosted provider. Naming both providers also means the chain is not weaker than DOGA's fallback, which can reach either one. A `laya_with_jev_fallback` selection therefore needs both `OPENROUTER_API_KEY` and `TYPESAFE_API_KEY`, and a missing one fails at selection naming the variable.
 
-An alias resolves to its canonical mode before anything routes, so it behaves identically to the mode it names: the same provider order, the same required keys, the same `provider_routing` block, and the same error. Anything that is not one of the nine canonical modes or the two aliases is rejected with an error listing every accepted value.
+`jev_api` is not an accepted value, because the hosted Jev arrangement it names already has four explicit mode names here. To match DOGA's Jev route exactly, including its OpenRouter-first order, set `JEV_PROVIDER_MODE=openrouter_then_typesafe`.
+
+An alias resolves to its canonical mode before anything routes, so it behaves identically to the mode it names: the same provider order, the same required keys, the same `provider_routing` block, and the same error. Anything that is not one of the ten canonical modes or the three aliases is rejected with an error listing every accepted value.
 
 ### The consecutive failure breaker
 

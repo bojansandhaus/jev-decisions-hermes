@@ -1,16 +1,22 @@
-"""Shared bounded client for Jev over a TypeSafe or OpenRouter key, or Laya locally.
+"""Shared bounded client for Jev, for Cloudflare Clef, or for Laya locally.
 
-Three arrangements for a typed question: a hosted Jev provider behind an API key,
-a local `laya-serve` process that needs no key at all, or an opt in chain that
-starts at the local server and falls through to one or both hosted providers.
-The plain local route replaces the hosted one rather than joining the chain. Only
-the `laya_then_*` modes let a failed local attempt reach a hosted provider.
+Four arrangements for a typed question: a hosted Jev provider behind an API key,
+the hosted Cloudflare Clef provider behind a Cloudflare token, a local
+`laya-serve` process that needs no key at all, or an opt in chain that starts at
+the local server and falls through to the hosted providers it names. The plain
+local route replaces the hosted ones rather than joining the chain. Only the
+`laya_then_*` modes let a failed local attempt reach a hosted provider.
 
-Two of DOGA's three selector names are accepted as aliases for the arrangements
-above: `laya_local` for the plain local mode, and `laya_with_jev_fallback` for the
-local first chain that names both hosted providers. `MODE_ALIASES` holds the
-mapping, and `resolve_mode` turns either vocabulary into the one canonical mode
-name every code path below uses.
+Clef is a provider, not a Jev key: it is selected by its own name, it is never
+appended to a mode that does not name it, and it falls back to nothing. `clef`
+and `clef-flash` are two checkpoints of that one provider, chosen with
+`JEV_CLEF_MODEL`, so `clef-flash` is never a provider name of its own.
+
+Three of DOGA's selector names are accepted as aliases for the arrangements
+above: `laya_local` for the plain local mode, `laya_with_jev_fallback` for the
+local first chain that names both hosted Jev providers, and `clef_api` for Clef
+alone. `MODE_ALIASES` holds the mapping, and `resolve_mode` turns either
+vocabulary into the one canonical mode name every code path below uses.
 
 A local failure may reach a hosted provider only until it has failed three times
 in a row. The count is per process, so a restart resets it, and any local answer
@@ -22,6 +28,7 @@ valid but incorrect local answer.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -42,8 +49,34 @@ TYPESAFE_MODEL = "jev-1.13.0"
 TYPESAFE_PROVIDER = "typesafe"
 OPENROUTER_PROVIDER = "openrouter"
 LAYA_PROVIDER = "laya"
+CLEF_PROVIDER = "clef"
+# Clef runs at Cloudflare Workers AI. The run endpoint is scoped to an account,
+# so the account ID is part of the URL rather than an optional setting, and the
+# token authorises the call. They are separate environment variables because
+# they are separate kinds of value: the account is configuration, the token is a
+# credential. Neither is read from any config file.
+CLEF_API_BASE = "https://api.cloudflare.com/client/v4/accounts"
+CLEF_RUN_PATH = "/ai/run/@cf/cloudflare/{model}"
+CLEF_MODELS = ("clef", "clef-flash")
+CLEF_DEFAULT_MODEL = "clef"
+CLEF_TOKEN_ENV = "CLOUDFLARE_API_TOKEN"
+CLEF_ACCOUNT_ENV = "CLOUDFLARE_ACCOUNT_ID"
+CLEF_MODEL_ENV = "JEV_CLEF_MODEL"
+# Clef answers typed questions as fast as the hosted Jev route does, so it keeps
+# the hosted default timeout rather than the long local CPU budget.
+CLEF_MAX_QUESTIONS = 64
+CLEF_MAX_ID_LENGTH = 100
+# Clef accepts letters, digits, '_', '.' and '-' in a question id and nothing
+# else. This repository builds ids such as `candidate:aaa` and `hook:name`, whose
+# colon Clef rejects, so ids are mapped before the request and restored after it.
+_CLEF_ID_ALLOWED = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")
+# A Cloudflare account ID is a 32 character hex string. The endpoint interpolates
+# it into a URL, so anything that could rewrite the path is refused before a
+# socket is opened.
+_CLEF_ACCOUNT_ALLOWED = frozenset("0123456789abcdef")
+_CLEF_ACCOUNT_LENGTH = 32
 HOSTED_PROVIDER_MODES = frozenset({
-    TYPESAFE_PROVIDER, OPENROUTER_PROVIDER,
+    TYPESAFE_PROVIDER, OPENROUTER_PROVIDER, CLEF_PROVIDER,
     "typesafe_then_openrouter", "openrouter_then_typesafe",
 })
 # Local first chains. Laya answers from the local server, and a failed local
@@ -59,20 +92,27 @@ PROVIDER_MODES = HOSTED_PROVIDER_MODES | LAYA_CHAIN_MODES | {LAYA_PROVIDER}
 # A provider bound to the local machine carries no credential requirement, so an
 # empty key means "send no Authorization header", not "disabled".
 KEYLESS_PROVIDERS = frozenset({LAYA_PROVIDER})
-# DOGA names three arrangements: `jev_api`, `laya_local`, and
-# `laya_with_jev_fallback`. The first is the hosted arrangement this repository
-# already has under its own hosted mode names, so it needs no alias. The other two
-# are accepted here and resolved to a canonical mode before anything routes:
+# DOGA names four arrangements: `jev_api`, `clef_api`, `laya_local`, and
+# `laya_with_jev_fallback`. `jev_api` is the hosted Jev arrangement this
+# repository already has under its own hosted mode names, so it needs no alias.
+# The other three are accepted here and resolved to a canonical mode before
+# anything routes:
 #
+#   clef_api               -> clef
 #   laya_local             -> laya
 #   laya_with_jev_fallback -> laya_then_openrouter_typesafe
 #
 # The chain is spelled out rather than implied. DOGA's own Jev route tries
 # OpenRouter first and direct TypeSafe second, and `openrouter` is this
 # repository's default hosted provider, so the local first chain that names both
-# hosted providers in that order is the faithful mapping. Nothing here is inferred
-# from the alias name at request time; the table is the whole mapping.
+# hosted providers in that order is the faithful mapping. Nothing here is
+# inferred from the alias name at request time; the table is the whole mapping.
+#
+# `clef_api` resolves to Clef alone, deliberately. Clef is a hosted route of its
+# own, so a Clef failure is a failure of this route and never a licence to call a
+# second classifier: the alias names no fallback at all.
 MODE_ALIASES: dict[str, str] = {
+    "clef_api": CLEF_PROVIDER,
     "laya_local": LAYA_PROVIDER,
     "laya_with_jev_fallback": "laya_then_openrouter_typesafe",
 }
@@ -85,7 +125,10 @@ LOCAL_FALLBACK_FAILURE_LIMIT = 3
 _local_failure_lock = threading.Lock()
 _local_failure_count = 0
 # The environment variable that carries each hosted provider's credential.
-PROVIDER_KEY_ENV = {TYPESAFE_PROVIDER: "TYPESAFE_API_KEY", OPENROUTER_PROVIDER: "OPENROUTER_API_KEY"}
+# Clef needs a second variable for its account ID, which is configuration rather
+# than a secret and is checked separately by `clef_credentials`.
+PROVIDER_KEY_ENV = {TYPESAFE_PROVIDER: "TYPESAFE_API_KEY", OPENROUTER_PROVIDER: "OPENROUTER_API_KEY",
+                    CLEF_PROVIDER: CLEF_TOKEN_ENV}
 FALLBACK_ORDER: dict[str, tuple[str, ...]] = {
     "typesafe_then_openrouter": (TYPESAFE_PROVIDER, OPENROUTER_PROVIDER),
     "openrouter_then_typesafe": (OPENROUTER_PROVIDER, TYPESAFE_PROVIDER),
@@ -277,6 +320,192 @@ def laya_route(environ: Mapping[str, str] | None = None) -> tuple[str, str]:
     return validate_laya_endpoint(f"{base}/{path.lstrip('/')}"), model
 
 
+def clef_credentials(api_key: str | None = None, environ: Mapping[str, str] | None = None
+                     ) -> tuple[str, str]:
+    """The Cloudflare bearer and the account that scopes the run endpoint.
+
+    Both are checked here, before any socket work, so a misconfigured Clef route
+    fails on the first request instead of degrading into another classifier. The
+    error names the missing variable, never its value, and both missing names are
+    reported together so a first run needs one fix rather than two.
+
+    The account ID is configuration, not a credential: it is not a secret, it
+    appears in the request URL, and it is never written anywhere. It is still
+    validated, because it is interpolated into a URL and a value carrying `../`
+    or a slash would rewrite which endpoint the request reaches.
+    """
+    env = os.environ if environ is None else environ
+    token = (api_key or env.get(CLEF_TOKEN_ENV) or "").strip()
+    account = (env.get(CLEF_ACCOUNT_ENV) or "").strip()
+    missing = [
+        name for name, value in ((CLEF_ACCOUNT_ENV, account), (CLEF_TOKEN_ENV, token))
+        if not value
+    ]
+    if missing:
+        raise JevClientError(
+            f"JEV_PROVIDER_MODE={CLEF_PROVIDER} needs {', '.join(missing)}; "
+            f"set the token in the Hermes secret scope and the account id in the environment"
+        )
+    if len(account) != _CLEF_ACCOUNT_LENGTH or not set(account) <= _CLEF_ACCOUNT_ALLOWED:
+        raise JevClientError(
+            f"invalid {CLEF_ACCOUNT_ENV}: expected {_CLEF_ACCOUNT_LENGTH} lowercase hex "
+            f"characters, got a value that is not a Cloudflare account id"
+        )
+    return token, account
+
+
+def clef_route(environ: Mapping[str, str] | None = None) -> tuple[str, str]:
+    """The Clef run endpoint and checkpoint, both settings rather than secrets.
+
+    ``clef`` is the 27B base checkpoint and ``clef-flash`` the smaller one
+    Cloudflare documents for latency-bound paths. Both answer the same typed
+    `noul`, `choice` and `score` questions, so the checkpoint is a setting on
+    one provider rather than a second provider. An unknown value is refused here
+    instead of calling a checkpoint that does not exist.
+    """
+    env = os.environ if environ is None else environ
+    account = (env.get(CLEF_ACCOUNT_ENV) or "").strip()
+    model = (env.get(CLEF_MODEL_ENV) or CLEF_DEFAULT_MODEL).strip().lower()
+    if model not in CLEF_MODELS:
+        raise JevClientError(f"{CLEF_MODEL_ENV} must be one of: {', '.join(CLEF_MODELS)}")
+    if not account:
+        raise JevClientError(f"JEV_PROVIDER_MODE={CLEF_PROVIDER} needs {CLEF_ACCOUNT_ENV}")
+    return f"{CLEF_API_BASE}/{account}{CLEF_RUN_PATH.format(model=model)}", model
+
+
+def _clef_safe_id(name: Any) -> str:
+    """A deterministic Clef-legal id for a caller id Clef would refuse.
+
+    Clef accepts letters, digits, `_`, `.` and `-` only, up to 100 characters.
+    A colon is the common case here, because this repository builds ids such as
+    `candidate:aaa` and `hook:name`, so the colon becomes an underscore and the
+    mapping stays readable in a wire capture. Any other disallowed character is
+    replaced the same way. An id too long to send is truncated and gains a digest
+    of the original, so truncation can never make two caller ids collide.
+    """
+    text = name if isinstance(name, str) else str(name)
+    safe = "".join(character if character in _CLEF_ID_ALLOWED else "_" for character in text)
+    if len(safe) <= CLEF_MAX_ID_LENGTH:
+        return safe
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
+    return f"{safe[:CLEF_MAX_ID_LENGTH - len(digest) - 1]}_{digest}"
+
+
+def clef_question_ids(questions: dict[str, Any]) -> tuple[dict[str, Any], Callable[[dict[str, Any]], dict[str, Any]]]:
+    """The questions as Clef must receive them, and the answer id reverse map.
+
+    Returns a rewritten question map plus a ``restore`` callable that puts the
+    caller's own question ids back onto an answer map. Ids Clef already accepts
+    are sent unchanged, so a caller that builds only Clef-legal names never sees
+    a renamed question; the ones it would refuse, such as ``candidate:aaa``, are
+    mapped to a safe id and mapped back afterwards, so nothing downstream has to
+    know the substitution happened.
+    """
+    if len(questions) > CLEF_MAX_QUESTIONS:
+        raise JevSchemaError(
+            f"a Clef request takes at most {CLEF_MAX_QUESTIONS} questions, got {len(questions)}"
+        )
+    safe: dict[str, Any] = {}
+    forward: dict[str, str] = {}
+    # An id Clef already accepts keeps the name the caller gave it, even when some
+    # other id would map onto that same string. Only a genuinely rewritten id is
+    # salted, so a caller whose own ids are all Clef-legal never sees a rename.
+    literal = {
+        name for name in questions
+        if isinstance(name, str) and name and len(name) <= CLEF_MAX_ID_LENGTH
+        and set(name) <= _CLEF_ID_ALLOWED
+    }
+    taken: set[str] = set()
+    for name, question in questions.items():
+        candidate = name if name in literal else _clef_safe_id(name)
+        if candidate in taken:
+            # Two caller ids landed on one Clef id. Disambiguate the later one with
+            # the digest its clean mapping would have carried.
+            candidate = _clef_safe_id(name)
+            if candidate in taken:
+                candidate = _clef_safe_id(f"{name}#{len(taken)}")
+        taken.add(candidate)
+        safe[candidate] = question
+        forward[candidate] = name
+    restore: Callable[[dict[str, Any]], dict[str, Any]] = (
+        lambda answers: {forward.get(name, name): answer for name, answer in answers.items()}
+    )
+    return safe, restore
+
+
+def validate_clef_answers(answers: Any, questions: dict[str, Any]) -> dict[str, Any]:
+    """Clef's typed answers under this repository's existing contract.
+
+    Clef names its three question types `noul`, `choice` and `score` exactly as
+    the System One API this client already speaks, so there is no second answer
+    contract to keep in step: `validate_answers` is called unchanged, and the
+    score legend index scale is enforced by the same `validate_laya_answers`
+    helper the local route uses. Only the envelope unwrapping is new.
+    """
+    return validate_laya_answers(validate_answers(answers, questions), questions)
+
+
+def _clef_result(data: Any) -> dict[str, Any]:
+    """Unwrap a Clef response envelope into the bare model output shape.
+
+    Cloudflare serves the model output directly from the run endpoint, while its
+    general REST surface wraps results in a ``success``/``result`` envelope. Both
+    are accepted, top level ``answers`` first. A ``success: false`` envelope
+    carries Cloudflare's own error codes, which say more than a generic parse
+    failure, so they are surfaced as they are rather than flattened into one.
+    """
+    if not isinstance(data, dict):
+        raise JevSchemaError("Cloudflare Workers AI returned a non-object response")
+    if data.get("success") is False:
+        codes = [
+            str(error.get("code")) for error in (data.get("errors") or [])
+            if isinstance(error, dict) and error.get("code") is not None
+        ]
+        detail = ", ".join(codes) if codes else "unknown error"
+        raise JevClientError(f"Cloudflare Workers AI request failed (code {detail})")
+    if isinstance(data.get("answers"), dict):
+        return data
+    inner = data.get("result")
+    if isinstance(inner, dict) and isinstance(inner.get("answers"), dict):
+        # Keep the envelope's own fields alongside the model output, so a caller
+        # reading `usage` or `success` from a wrapped answer still sees them.
+        return {**data, **inner}
+    raise JevSchemaError("Cloudflare Workers AI returned a response with no answers map")
+
+
+def _request_clef(state: Any, questions: dict[str, Any], *, transport: Callable[..., Any] | None = None,
+                  timeout: float = 30.0, api_key: str | None = None) -> dict[str, Any]:
+    """One Clef review through the shared request path, with its own envelope.
+
+    The credentials, the checkpoint, and the question ids are all resolved before
+    any socket work, and the POST itself goes through `_request_once`, so Clef
+    reuses this module's retry loop, header construction and error text rather
+    than a second copy of them. What is specific to Clef is the per account URL,
+    the checkpoint in the body's `model` field, the id mapping, and the envelope
+    reader. A failure raises: Clef is a hosted route with no fallback, so it is
+    never a licence to call a second classifier.
+    """
+    token, _account = clef_credentials(api_key)
+    endpoint, model = clef_route()
+    safe_questions, restore = clef_question_ids(questions)
+    # A score question needs an ordered list of level descriptions wherever the
+    # answer is read on a legend index scale, so Clef is held to the same rule.
+    validate_laya_questions(safe_questions)
+    if transport is not None:
+        raw = transport({"model": model, "state": state, "questions": safe_questions},
+                        api_key=token, timeout=timeout, endpoint=endpoint)
+        if not isinstance(raw, dict):
+            raise JevSchemaError("transport returned a non-object")
+        result = _clef_result(raw)
+        result["answers"] = validate_clef_answers(result["answers"], safe_questions)
+    else:
+        result = _request_once(state, safe_questions, token, endpoint, model, timeout,
+                               unwrap=_clef_result)
+    # The caller's own question ids go back on, so nothing above this line can
+    # tell that `candidate:aaa` was sent as `candidate_aaa`.
+    return {**result, "answers": restore(result["answers"])}
+
+
 def validate_laya_questions(questions: dict[str, Any]) -> dict[str, Any]:
     """Reject a question the local route can only answer on the wrong scale.
 
@@ -389,6 +618,20 @@ def request_decisions(
         )
     if mode in LAYA_CHAIN_MODES:
         _require_hosted_keys(mode, order, api_key, fallback_api_key)
+    if mode == CLEF_PROVIDER:
+        # Clef is a hosted route with no fallback, so a failed review is raised
+        # rather than degrading into another classifier. Its credentials and its
+        # checkpoint are checked before the transport is touched.
+        try:
+            return _request_clef(state, questions, transport=transport, timeout=timeout,
+                                 api_key=api_key)
+        except JevClientError as exc:
+            # Only the exception class is logged, never the reviewed state and
+            # never the token. A missing variable is named by the exception
+            # message itself, which is configuration rather than case content.
+            logger.warning("hosted %s failed (%s); no fallback provider for this route",
+                           mode, type(exc).__name__)
+            raise
     if local_first:
         validate_laya_questions(questions)
     if transport is not None and mode not in LAYA_CHAIN_MODES:
@@ -521,7 +764,16 @@ def _with_routing(result: dict[str, Any], mode: str, routes: list[tuple[str, str
 
 
 def _request_once(state: Any, questions: dict[str, Any], api_key: str,
-                  endpoint: str, model: str, timeout: float) -> dict[str, Any]:
+                  endpoint: str, model: str, timeout: float,
+                  unwrap: Callable[[Any], dict[str, Any]] | None = None) -> dict[str, Any]:
+    """One POST with the three attempt retry loop every hosted route shares.
+
+    ``unwrap`` is the one place a route differs: OpenRouter and TypeSafe return
+    the answers map at the top level, while Cloudflare's Clef route may also
+    wrap it in a REST envelope. Passing the route's own envelope reader here
+    keeps the retry, header, and error handling identical across routes instead
+    of forking a second copy of the loop.
+    """
     payload = {"model": model, "state": state, "questions": questions}
     body = json.dumps(payload).encode("utf-8")
     deadline = time.monotonic() + timeout
@@ -539,8 +791,10 @@ def _request_once(state: Any, questions: dict[str, Any], api_key: str,
         request = Request(endpoint, data=body, method="POST", headers=headers)
         try:
             with urlopen(request, timeout=remaining) as response:
-                result = json.loads(response.read().decode("utf-8"))
-            result["answers"] = validate_answers(result.get("answers"), questions)
+                raw = json.loads(response.read().decode("utf-8"))
+            result = unwrap(raw) if unwrap is not None else raw
+            result["answers"] = validate_clef_answers(result["answers"], questions) \
+                if unwrap is not None else validate_answers(result.get("answers"), questions)
             return result
         except HTTPError as exc:
             last = exc
@@ -548,7 +802,12 @@ def _request_once(state: Any, questions: dict[str, Any], api_key: str,
                 raise JevClientError(f"{endpoint} HTTP {exc.code}") from exc
         except (URLError, TimeoutError, json.JSONDecodeError, JevSchemaError) as exc:
             last = exc
-            if isinstance(exc, JevSchemaError) or attempt == 2:
+            if isinstance(exc, JevSchemaError):
+                # A typed answer outside the contract is not a transient fault, so
+                # it is never retried. It keeps its own type so a caller can still
+                # tell a schema failure from a transport failure.
+                raise
+            if attempt == 2:
                 raise JevClientError(str(exc)) from exc
         time.sleep(min(2**attempt, max(0.0, deadline - time.monotonic())))
     raise JevClientError(f"{endpoint} request failed: {last}")

@@ -139,6 +139,44 @@ model, because a local hard stop has to be auditable and cannot call a provider.
 
 ---
 
+Cloudflare Clef
+
+The optional hosted provider route in `jev_client.py` (`JEV_PROVIDER_MODE=clef`,
+or the DOGA alias `clef_api`) calls the Cloudflare Clef decision model over the
+Cloudflare Workers AI REST API:
+
+https://developers.cloudflare.com/workers-ai/models/clef/
+https://developers.cloudflare.com/workers-ai/models/clef-flash/
+
+NO CLEF CODE OR MODEL WEIGHTS ARE VENDORED, COPIED, OR ADAPTED IN THIS
+REPOSITORY.
+
+Clef is not a dependency of this package and is not installed by it. The route
+speaks the request and response contract that Cloudflare publishes, and nothing
+else: `POST /client/v4/accounts/{account}/ai/run/@cf/cloudflare/{model}` with a
+`{"model", "state", "questions"}` body, and the typed `noul`, `choice` and `score`
+answers that contract defines.
+
+Clef's weights are distributed by Cloudflare under the Apache License 2.0, and
+the API is Cloudflare's own service subject to its terms. The surrounding Jev
+Decisions plugin is separately Copyright (c) 2026 Bojan Sandhaus and distributed
+under the MIT License in LICENSE. Because no Clef source or weights are
+redistributed here, no Apache 2.0 notice is reproduced in this file; the
+license text ships with the model at the links above and in Cloudflare's
+Workers AI terms.
+
+Using this route sends the bounded review `state` and the questions to
+Cloudflare. It needs two environment values: `CLOUDFLARE_API_TOKEN`, a
+Cloudflare API token with **Account > Workers AI > Read**, which is a credential
+and is held in the Hermes secret scope, and `CLOUDFLARE_ACCOUNT_ID`, the 32
+character account id, which is configuration rather than a secret but does appear
+in the request URL. Requests on this route are billed to the Cloudflare account
+under Workers AI pricing. Nothing on this route is exercised against a live
+Cloudflare account by this repository's test suite; see
+`docs/releases/0.7.0.md`.
+
+---
+
 Laya
 
 The optional local provider route in `jev_client.py` (`JEV_PROVIDER_MODE=laya`) is a
