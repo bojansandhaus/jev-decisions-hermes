@@ -232,12 +232,20 @@ class TestMetricsCache:
 
 
 class TestClosedLoopReadIsBounded:
-    def test_list_records_reads_only_what_it_returns(self, store):
-        write_rows(store, 1_000, prefix="cl")
+    def test_list_records_reads_only_what_it_returns(self, tmp_path, monkeypatch):
+        # Must point closed_loop at the store, not ledger: the `store` fixture
+        # only redirects ledger._path, so list_records() read an empty default
+        # store. It passed locally only because an earlier test in the class had
+        # already redirected closed_loop._path and the redirect leaked.
+        path = tmp_path / "cl.jsonl"
+        monkeypatch.setattr(closed_loop, "_path", lambda: path)
+        write_rows(path, 1_000, prefix="cl")
         assert len(closed_loop.list_records(limit=10)) == 10
 
-    def test_list_records_caps_at_its_own_maximum(self, store):
-        write_rows(store, 1_000, prefix="cl")
+    def test_list_records_caps_at_its_own_maximum(self, tmp_path, monkeypatch):
+        path = tmp_path / "cl.jsonl"
+        monkeypatch.setattr(closed_loop, "_path", lambda: path)
+        write_rows(path, 1_000, prefix="cl")
         assert len(closed_loop.list_records(limit=10_000)) <= 500
 
     def test_list_records_does_not_read_whole_file(self, tmp_path, monkeypatch):
