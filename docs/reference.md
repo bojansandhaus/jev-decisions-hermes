@@ -120,7 +120,7 @@ Call `jev_loop` with:
 
 This returns `verified: false`, `status: "mismatch"`, and `next: "read_back_expected"`. A matching `on` observation returns `matched`. Without an expected value, the next step is `compare_expected`. Python callers can use `verification.verify_observation(source, context, result)`.
 
-The comparator trims whitespace and ignores letter case. For an object result it compares the `state` field; otherwise it compares the supplied result as text. `expected_state` and `expected_status` are aliases for `expected`. Error or timeout text produces `unavailable`. This is a small text/state comparator, not a general object validator or service health client. It does not contact a device, check timestamps, or prove that the observation belongs to the requested target. The host must establish those facts.
+The comparator trims whitespace and ignores letter case. For an object result it compares the `state` field; otherwise it compares the supplied result as text. `expected_state` and `expected_status` are aliases for `expected`. A failure signal produces `unavailable`: a `collector_error:` prefix on the result, an `error`, `errors`, `timeout` or `timed_out` KEY in an object result, or the words `error` or `timeout` in a bare string result, which has no structure to read keys from. A key that is present but empty, such as `{"error": null}`, is not a failure. This is a small text/state comparator, not a general object validator or service health client. It does not contact a device, check timestamps, or prove that the observation belongs to the requested target. The host must establish those facts.
 
 ### Event cases: `jev_ingest`
 

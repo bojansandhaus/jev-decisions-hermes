@@ -816,11 +816,64 @@ JEV_SUPERVISION_SCHEMA = {
             "probabilities": {"type": "object"},
             "mode": {"type": "string", "enum": list(_supervision.SUPERVISION_MODES)},
             "include_recent": {"type": "boolean"},
+            # The remaining fields are the settable ones. They were missing here
+            # while the `configure` handler accepted all seven, and this schema
+            # sets additionalProperties False, so a caller crossing the tool
+            # boundary could change `mode` and nothing else. `mode` was already
+            # listed because other actions read it. Each entry mirrors the type
+            # the handler already accepted, so runtime behaviour is unchanged
+            # and only the tool boundary stops rejecting valid input.
+            "enabled": {
+                "type": "boolean",
+                "description": "Turn supervision on or off for this process. Off suppresses every local control and hook.",
+            },
+            "admission_enabled": {
+                "type": "boolean",
+                "description": "Classify each turn locally. Never blocks on its own.",
+            },
+            "relevance_threshold": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0,
+                "description": "How relevant an event must be before a remote opinion is warranted. Clamped to 0.0 through 1.0.",
+            },
+            "challenge_confidence": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0,
+                "description": "Confidence a disagreement needs before it becomes a challenge. Clamped to 0.0 through 1.0.",
+            },
+            "max_provider_calls_per_turn": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000,
+                "description": "Cap on provider calls per supervised turn. Clamped to 1 through 1000.",
+            },
+            "repeated_failure_replan_at": {
+                "type": "integer",
+                "minimum": 2,
+                "maximum": 20,
+                "description": "Identical failures needed before a control is created. Clamped to 2 through 20.",
+            },
         },
         "required": ["action"],
         "additionalProperties": False,
     },
 }
+
+# Every field `configure` accepts, in one place. The handler and this schema are
+# both derived from it so a field can never be settable through one and refused
+# through the other again. `tests/test_supervision_integration.py` asserts the
+# two stay in step.
+JEV_SUPERVISION_SETTABLE = (
+    "enabled",
+    "mode",
+    "admission_enabled",
+    "relevance_threshold",
+    "challenge_confidence",
+    "max_provider_calls_per_turn",
+    "repeated_failure_replan_at",
+)
 
 
 def _supervision_turn_key(turn_id: str, session_id: str) -> str:
@@ -955,12 +1008,7 @@ def jev_supervision_handler(args: dict[str, Any], **_: Any) -> str:
             )
             return json.dumps({"success": True, **result}, sort_keys=True, default=str)
         if action == "configure":
-            settable = {
-                "enabled", "mode", "admission_enabled", "relevance_threshold",
-                "challenge_confidence", "max_provider_calls_per_turn",
-                "repeated_failure_replan_at",
-            }
-            changes = {key: value for key, value in args.items() if key in settable}
+            changes = {key: value for key, value in args.items() if key in JEV_SUPERVISION_SETTABLE}
             if not changes:
                 raise ValueError("configure requires at least one settable field")
             config = supervision.configure(**changes)

@@ -5,6 +5,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -59,6 +61,64 @@ def test_observation_verification_requires_expected_state() -> None:
     assert verification.verify_observation("paperless", {}, "healthy")["next"] == "compare_expected"
     assert verification.verify_observation("paperless", {"expected_status": "healthy"}, "healthy")["verified"] is True
     assert verification.verify_observation("home_assistant", {"expected_state": "off"}, {"state": "on"})["verified"] is False
+
+
+# An infrastructure state is a fact about the target, not a report about the
+# collector. These four all contain the substring "error" or "timeout" and all
+# used to be reported as unavailable, which wrote `awaiting_verification` into
+# the closed loop for an observation the host had in fact verified.
+@pytest.mark.parametrize("state", ["errored", "error_free", "no_error", "timeout_reached"])
+def test_a_state_naming_an_error_is_a_verified_observation(state: str) -> None:
+    result = verification.verify_observation("docker", {"expected": state}, {"state": state})
+    assert result == {
+        "verified": True, "status": "matched", "next": "done",
+        "authority": "deterministic_verification",
+    }
+
+
+def test_a_word_inside_any_value_is_not_an_error_signal() -> None:
+    """The signal is a KEY, not a word appearing somewhere in a value."""
+    result = verification.verify_observation(
+        "docker", {"expected": "online"}, {"state": "online", "note": "no_error since reboot"},
+    )
+    assert result["status"] == "matched"
+
+
+def test_a_real_collector_failure_is_still_unavailable() -> None:
+    result = verification.verify_observation("docker", {"expected": "errored"}, "collector_error: dial tcp: refused")
+    assert result["verified"] is False
+    assert result["status"] == "unavailable"
+    assert result["next"] == "retry_or_inspect"
+
+
+def test_a_dict_error_key_is_still_unavailable() -> None:
+    result = verification.verify_observation(
+        "docker", {"expected": "running"}, {"state": "running", "error": "boom"},
+    )
+    assert result["verified"] is False
+    assert result["status"] == "unavailable"
+
+
+def test_an_error_key_with_nothing_in_it_is_not_a_failure() -> None:
+    """`{"error": None}` says there is no error. Reading it as one is the same
+    bug as reading `errored` as one, in the other direction."""
+    for empty in (None, "", [], {}):
+        result = verification.verify_observation(
+            "docker", {"expected": "ok"}, {"state": "ok", "error": empty},
+        )
+        assert result["status"] == "matched", empty
+
+
+def test_a_timeout_key_is_a_signal_but_a_timeout_state_is_not() -> None:
+    assert verification.verify_observation("nas", {"expected": "up"}, {"state": "up", "timeout": 30})["status"] == "unavailable"
+    assert verification.verify_observation("nas", {"expected": "timeout_reached"}, {"state": "timeout_reached"})["status"] == "matched"
+
+
+def test_a_plain_string_keeps_the_documented_contract() -> None:
+    """A bare string carries no structure, so its whole content is the signal."""
+    assert verification.verify_observation("paperless", {"expected": "healthy"}, "healthy")["status"] == "matched"
+    assert verification.verify_observation("paperless", {"expected": "up"}, "request timeout after 30s")["status"] == "unavailable"
+    assert verification.verify_observation("paperless", {"expected": "up"}, "Error: refused")["status"] == "unavailable"
 
 
 def test_tool_results_correlate_concurrent_same_name_by_invocation(monkeypatch) -> None:

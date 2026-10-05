@@ -315,3 +315,113 @@ class TestClosedLoopReadIsBounded:
     def test_the_shared_helper_is_the_same_object(self):
         """closed_loop must not keep a second copy of the tail logic."""
         assert closed_loop.tail_lines is ledger.tail_lines
+
+
+class TestAssessReadIsBounded:
+    """`assess()` was missed when `list_records` got its bounded read.
+
+    It called `_read()` with no limit, so every `assess` decoded the whole store
+    and then ran `json.loads` on every row in it, to answer a question about one
+    decision. `assess()` is reachable from the `jev_loop action=assess` tool.
+
+    It cannot be given a bounded tail the way `list_records` is: a decision
+    recorded before the window is a decision that exists, and a tail read would
+    report `found: False` for it. So the bound is on the work, not on the bytes
+    read: a line is a substring test before anything is decoded, and only a line
+    naming the decision is parsed. These tests pin the observable consequence,
+    that most rows are never parsed, without pinning a wall clock.
+    """
+
+    @staticmethod
+    def _store(path: Path, decision_rows: int, other_rows: int) -> None:
+        rows = []
+        for i in range(decision_rows):
+            rows.append({"kind": "decision", "decision_id": "d1", "question": "q", "chosen": "c"})
+            rows.append({"kind": "outcome", "decision_id": "d1", "status": "ok", "success": bool(i % 2)})
+        rows += [
+            {"kind": "observation", "decision_id": f"other{i}", "observation": "x", "source": "s"}
+            for i in range(other_rows)
+        ]
+        path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+    def test_assess_returns_identical_output_to_a_whole_store_scan(self, tmp_path, monkeypatch):
+        path = tmp_path / "cl.jsonl"
+        monkeypatch.setattr(closed_loop, "_path", lambda: path)
+        self._store(path, decision_rows=6, other_rows=400)
+
+        rows = closed_loop._read_matching("d1")
+        assert rows == [r for r in closed_loop._read() if r.get("decision_id") == "d1"]
+
+    def test_assess_still_finds_a_decision_older_than_any_tail(self, tmp_path, monkeypatch):
+        """The reason this is not a tail read. `d1` is the very first row."""
+        path = tmp_path / "cl.jsonl"
+        monkeypatch.setattr(closed_loop, "_path", lambda: path)
+        self._store(path, decision_rows=3, other_rows=20_000)
+
+        assert closed_loop.assess("d1")["found"] is True
+        assert closed_loop.assess("d1")["outcomes"] == 3
+
+    def test_assess_does_not_parse_rows_that_are_not_its_own(self, tmp_path, monkeypatch):
+        """The optimisation itself: one `json.loads` per unrelated row is the
+        whole cost, and it must not happen."""
+        path = tmp_path / "cl.jsonl"
+        monkeypatch.setattr(closed_loop, "_path", lambda: path)
+        self._store(path, decision_rows=4, other_rows=20_000)
+
+        calls: list[object] = []
+        real_loads = json.loads
+
+        def counting_loads(text, *args, **kwargs):
+            calls.append(text)
+            return real_loads(text, *args, **kwargs)
+
+        monkeypatch.setattr(closed_loop.json, "loads", counting_loads)
+        closed_loop.assess("d1")
+        assert len(calls) <= 20, f"assess parsed {len(calls)} rows of a 20,012 row store"
+
+    def test_an_absent_decision_still_reports_not_found(self, tmp_path, monkeypatch):
+        path = tmp_path / "cl.jsonl"
+        monkeypatch.setattr(closed_loop, "_path", lambda: path)
+        self._store(path, decision_rows=4, other_rows=2_000)
+
+        assert closed_loop.assess("absent")["found"] is False
+
+    def test_a_decision_id_the_writer_escaped_is_still_found(self, tmp_path, monkeypatch):
+        """The substring test is a filter. An ID with non-ASCII text is stored as
+        `\\u00e9` by `json.dumps`, so it cannot match its own bytes. An empty
+        result must fall back to the exact scan instead of reporting a decision
+        missing."""
+        path = tmp_path / "cl.jsonl"
+        monkeypatch.setattr(closed_loop, "_path", lambda: path)
+        rows = [{"kind": "observation", "decision_id": f"n{i}", "observation": "x", "source": "s"} for i in range(1_500)]
+        rows.insert(700, {"kind": "decision", "decision_id": "uni-é中", "question": "q", "chosen": "c"})
+        rows.append({"kind": "outcome", "decision_id": "uni-é中", "status": "ok", "success": True})
+        path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+        assert closed_loop.assess("uni-é中")["found"] is True
+        assert closed_loop.assess("uni-é中")["outcomes"] == 1
+
+    def test_a_record_split_across_read_blocks_is_found(self, tmp_path, monkeypatch):
+        """Rows are longer than the block size, so most records straddle a read.
+        A partial line must never be parsed as a record."""
+        path = tmp_path / "cl.jsonl"
+        monkeypatch.setattr(closed_loop, "_path", lambda: path)
+        monkeypatch.setattr(closed_loop, "_READ_BLOCK", 64)
+        self._store(path, decision_rows=3, other_rows=300)
+
+        assert closed_loop._read_matching("d1") == [r for r in closed_loop._read() if r.get("decision_id") == "d1"]
+
+    def test_a_store_with_no_trailing_newline_is_still_read(self, tmp_path, monkeypatch):
+        path = tmp_path / "cl.jsonl"
+        monkeypatch.setattr(closed_loop, "_path", lambda: path)
+        path.write_text(
+            json.dumps({"kind": "decision", "decision_id": "d1", "question": "q", "chosen": "c"})
+            + "\n"
+            + json.dumps({"kind": "outcome", "decision_id": "d1", "status": "ok", "success": True})
+        )
+
+        assert closed_loop.assess("d1")["outcomes"] == 1
+
+    def test_a_missing_store_reports_not_found(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(closed_loop, "_path", lambda: tmp_path / "absent.jsonl")
+        assert closed_loop.assess("d1")["found"] is False

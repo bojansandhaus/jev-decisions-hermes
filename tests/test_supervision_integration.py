@@ -112,6 +112,103 @@ def test_configure_rejects_unknown_only_payload(plugin):
     assert "error" in result
 
 
+# The test above passed for the wrong reason. It called the handler directly, and
+# the handler is not the boundary: `JEV_SUPERVISION_SCHEMA` sets
+# additionalProperties False, so a field the handler accepts is still refused
+# when a caller crosses the tool. Six of the seven settable fields were missing
+# from the schema, which made `configure` able to switch `mode` and nothing else.
+def test_every_settable_field_is_declared_in_the_tool_schema(plugin):
+    properties = plugin.JEV_SUPERVISION_SCHEMA["parameters"]["properties"]
+    missing = [key for key in plugin.JEV_SUPERVISION_SETTABLE if key not in properties]
+    assert not missing, f"configure accepts these, the schema rejects them: {missing}"
+
+
+# A minimal check of the exact keywords this schema uses, so the guard runs with
+# pytest alone. CI installs pytest and nothing else, and a skipped drift test is
+# exactly the failure this PR exists to prevent.
+def _schema_rejects(schema: dict, payload: dict) -> str | None:
+    """Return the reason `payload` is invalid, or None if it validates."""
+    properties = schema.get("properties", {})
+    if schema.get("additionalProperties") is False:
+        extra = sorted(set(payload) - set(properties))
+        if extra:
+            return f"additional properties not allowed: {extra}"
+    for name, value in payload.items():
+        declared = properties.get(name)
+        if declared is None:
+            continue
+        expected_type = declared.get("type")
+        if expected_type == "boolean" and not isinstance(value, bool):
+            return f"{name} must be boolean"
+        if expected_type == "integer" and (isinstance(value, bool) or not isinstance(value, int)):
+            return f"{name} must be integer"
+        if expected_type == "number" and (isinstance(value, bool) or not isinstance(value, (int, float))):
+            return f"{name} must be number"
+        if expected_type == "string" and not isinstance(value, str):
+            return f"{name} must be string"
+        if "enum" in declared and value not in declared["enum"]:
+            return f"{name} must be one of {declared['enum']}"
+    for required in schema.get("required", []):
+        if required not in payload:
+            return f"missing required property {required}"
+    return None
+
+
+def _settable_types(plugin) -> dict:
+    properties = plugin.JEV_SUPERVISION_SCHEMA["parameters"]["properties"]
+    return {name: properties[name]["type"] for name in plugin.JEV_SUPERVISION_SETTABLE}
+
+
+def test_the_settable_set_is_the_documented_one(plugin):
+    assert set(plugin.JEV_SUPERVISION_SETTABLE) == {
+        "enabled", "mode", "admission_enabled", "relevance_threshold",
+        "challenge_confidence", "max_provider_calls_per_turn",
+        "repeated_failure_replan_at",
+    }
+
+
+def test_the_schema_types_match_what_the_handler_accepts(plugin):
+    """A wrong declared type would now fail at the boundary instead of being
+    coerced by `configure`, so pin each type to the handler's own coercion."""
+    assert _settable_types(plugin) == {
+        "enabled": "boolean",
+        "mode": "string",
+        "admission_enabled": "boolean",
+        "relevance_threshold": "number",
+        "challenge_confidence": "number",
+        "max_provider_calls_per_turn": "integer",
+        "repeated_failure_replan_at": "integer",
+    }
+
+
+@pytest.mark.parametrize(
+    "field,value,expected",
+    [
+        ("enabled", False, False),
+        ("mode", "correct_next", "correct_next"),
+        ("admission_enabled", False, False),
+        ("relevance_threshold", 0.4, 0.4),
+        ("challenge_confidence", 0.5, 0.5),
+        ("max_provider_calls_per_turn", 7, 7),
+        ("repeated_failure_replan_at", 5, 5),
+    ],
+)
+def test_each_settable_field_survives_the_tool_boundary(plugin, field, value, expected):
+    """Validate against the real schema, then run the handler, so a field cannot
+    be settable in one and refused in the other."""
+    args = {"action": "configure", field: value}
+    reason = _schema_rejects(plugin.JEV_SUPERVISION_SCHEMA["parameters"], args)
+    assert reason is None, f"the tool boundary refuses {field}: {reason}"
+    result = json.loads(plugin.jev_supervision_handler(args))
+    assert result["success"] is True, result
+    assert result["config"][field] == expected
+
+
+def test_an_undeclared_property_is_still_refused_by_the_schema(plugin):
+    """The drift guard must not have turned the schema into an anything-goes."""
+    assert _schema_rejects(plugin.JEV_SUPERVISION_SCHEMA["parameters"], {"action": "configure", "nonsense": 1})
+
+
 def test_unknown_action_is_reported(plugin):
     result = json.loads(plugin.jev_supervision_handler({"action": "explode"}))
     assert result["error"] == "unknown action"
