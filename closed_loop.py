@@ -12,6 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from ledger import tail_lines
 
 try:
     from .runtime import get_hermes_home
@@ -40,12 +41,24 @@ def _append(kind: str, payload: dict[str, Any], record_id: str | None = None) ->
     return record_id
 
 
-def _read() -> list[dict[str, Any]]:
+def _read(limit: int | None = None) -> list[dict[str, Any]]:
+    """Read the closed-loop store, newest rows last.
+
+    `limit` bounds how much is read, not just what is returned. The previous
+    implementation always read the whole file with no limit at all, so every
+    consumer paid O(total history). `None` keeps the old whole-file behaviour for
+    callers that genuinely need it.
+    """
     path = _path()
     if not path.exists():
         return []
+    lines = (
+        path.read_text(encoding="utf-8").splitlines()
+        if limit is None
+        else tail_lines(path, limit)
+    )
     rows = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in lines:
         try:
             row = json.loads(line)
         except json.JSONDecodeError:
@@ -160,4 +173,7 @@ def assess(decision_id: str) -> dict[str, Any]:
 
 
 def list_records(limit: int = 100) -> list[dict[str, Any]]:
-    return _read()[-max(1, min(limit, 500)):]
+    wanted = max(1, min(limit, 500))
+    # Read only as far back as `wanted`, instead of the whole file and then
+    # discarding almost all of it.
+    return _read(limit=wanted)[-wanted:]

@@ -73,3 +73,17 @@ Notes: [docs/releases/0.2.0.md](docs/releases/0.2.0.md).
 ## [0.1.0]
 
 Notes: [docs/releases/0.1.0.md](docs/releases/0.1.0.md).
+
+## 0.9.0 - 2026-10-05
+
+- Bounded store reads. `ledger.read(limit)` read the whole file and sliced the
+  result, so `read(10)` cost 96% of `read(5000)`; `closed_loop._read()` had no
+  limit at all. Both now walk backwards from the end of the file. On a 52,500-row
+  store `read(10)` went from 11.31 ms to 0.33 ms.
+- Cached `metrics()` on `(mtime_ns, size)`. It is a pure function of an
+  append-only file, and both `digest()` and the gateway snapshot call it: 17.46 ms
+  cold to 0.004 ms warm, values identical.
+- `closed_loop.list_records()` now reads only as far back as it returns.
+- 40 new tests in `tests/test_store_read_bounds.py`, each asserting a mechanism
+  (bytes read off disk, or a store handle opened) rather than a wall-clock
+  threshold. Full detail in `RELEASE_NOTES_v0.9.0.md`.
