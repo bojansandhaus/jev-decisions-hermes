@@ -20,14 +20,15 @@ measured 11.58 ms cold to 0.023 ms warm.
 
 from __future__ import annotations
 
+import builtins
 import io
 import json
 import pathlib
 import subprocess
 import sys
-import unittest.mock
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -50,6 +51,61 @@ def write_rows(path: Path, count: int, prefix: str = "row") -> list[dict]:
     rows = [{"kind": "review", "review_id": f"{prefix}{i}", "score": 0.9} for i in range(count)]
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
     return rows
+
+
+class _ByteCounter:
+    """Counts bytes read from one path, independent of how the file is opened.
+
+    The first version of these tests patched `io.open` and wrapped the returned
+    handle's `read`. That works on 3.11, where `pathlib.Path.open` routes through
+    `io.open`, and silently counts zero bytes on 3.10, where it does not: the CI
+    run failed with "consumed 0 of 1148890 bytes". Wrapping `builtins.open` AND
+    patching `Path.open` covers both, and the assertion is about the code reading
+    a bounded number of bytes, not about which module opened the file.
+    """
+
+    def __init__(self, target: Path):
+        self.target = target
+        self.bytes_read = 0
+
+    def _wrap(self, handle):
+        inner = handle.read
+
+        def read(size_or_pos=-1):
+            data = inner(size_or_pos)
+            self.bytes_read += len(data)
+            return data
+
+        handle.read = read  # type: ignore[method-assign]
+        return handle
+
+    def __enter__(self):
+        self._patches = []
+        real_builtin_open = builtins.open
+        real_path_open = Path.open
+
+        def builtin_spy(file, mode="r", *args, **kwargs):
+            handle = real_builtin_open(file, mode, *args, **kwargs)
+            if Path(file) == self.target:
+                return self._wrap(handle)
+            return handle
+
+        def path_spy(self_path, mode="r", *args, **kwargs):
+            handle = real_path_open(self_path, mode, *args, **kwargs)
+            if self_path == self.target:
+                return self._wrap(handle)
+            return handle
+
+        self._patches.append(patch.object(builtins, "open", builtin_spy))
+        self._patches.append(patch.object(Path, "open", path_spy))
+        for item in self._patches:
+            item.start()
+        return self
+
+    def __exit__(self, *exc):
+        for item in reversed(self._patches):
+            item.stop()
+        return False
 
 
 class TestTailLinesIsExact:
@@ -130,27 +186,12 @@ class TestReadIsBounded:
         size = store.stat().st_size
         ledger.read(10)  # warm any import-time state
 
-        counted = {"bytes": 0}
-        real_open = io.open
-
-        def counting_open(file, mode="r", *args, **kwargs):
-            handle = real_open(file, mode, *args, **kwargs)
-            if Path(file) == store and "b" in mode:
-                inner = handle.read
-
-                def read(size_or_pos=-1):
-                    data = inner(size_or_pos)
-                    counted["bytes"] += len(data)
-                    return data
-
-                handle.read = read  # type: ignore[method-assign]
-            return handle
-
-        with unittest.mock.patch.object(io, "open", counting_open):
+        with _ByteCounter(store) as counter:
             rows = ledger.read(10)
         assert len(rows) == 10
-        assert 0 < counted["bytes"] < size / 2, (
-            f"read(10) consumed {counted['bytes']} of {size} bytes; "
+        assert counter.bytes_read > 0, "the counter did not observe the read"
+        assert counter.bytes_read < size / 2, (
+            f"read(10) consumed {counter.bytes_read} of {size} bytes; "
             "a bounded read must not read the whole file"
         )
 
@@ -182,26 +223,26 @@ class TestMetricsCache:
         first = ledger.metrics()
         assert first["reviews"] == 0
 
-    def test_a_repeat_call_does_not_read_the_store_again(self, store):
+    def test_a_repeat_call_does_not_open_the_store_again(self, store):
         """Assert the mechanism: the second call must not open the file at all.
 
-        A timing threshold would be worthless here (the whole computation is a
-        few milliseconds), so count store reads instead.
+        A timing threshold would be worthless here (the whole computation is a few
+        milliseconds), so count opens instead.
         """
         write_rows(store, 5_000)
         ledger.metrics()
-        counted = {"n": 0}
-        real_open = io.open
+        opens = {"n": 0}
+        real_builtin_open = builtins.open
+        real_path_open = Path.open
 
-        def counting_open(file, mode="r", *args, **kwargs):
-            if Path(file) == store:
-                counted["n"] += 1
-            return real_open(file, mode, *args, **kwargs)
+        def count(path_obj, *args, **kwargs):
+            opens["n"] += 1
+            return real_path_open(path_obj, *args, **kwargs)
 
-        with unittest.mock.patch.object(io, "open", counting_open):
+        with patch.object(Path, "open", count):
             ledger.metrics()
-        assert counted["n"] == 0, (
-            f"a warm metrics() opened the store {counted['n']} time(s); "
+        assert opens["n"] == 0, (
+            f"a warm metrics() opened the store {opens['n']} time(s); "
             "it should be served from the (mtime_ns, size) cache"
         )
 
@@ -250,33 +291,19 @@ class TestClosedLoopReadIsBounded:
 
     def test_list_records_does_not_read_whole_file(self, tmp_path, monkeypatch):
         """`list_records(limit=10)` capped its RESULT at 10 while reading the whole
-        file. Assert it does not open the store's full contents."""
+        file. Assert it does not read the store's full contents."""
         path = tmp_path / "cl.jsonl"
         monkeypatch.setattr(closed_loop, "_path", lambda: path)
         write_rows(path, 20_000)
         size = path.stat().st_size
         closed_loop.list_records(limit=10)
-        counted = {"bytes": 0}
-        real_open = io.open
 
-        def counting_open(file, mode="r", *args, **kwargs):
-            handle = real_open(file, mode, *args, **kwargs)
-            if Path(file) == path and "b" in mode:
-                inner = handle.read
-
-                def read(size_or_pos=-1):
-                    data = inner(size_or_pos)
-                    counted["bytes"] += len(data)
-                    return data
-
-                handle.read = read  # type: ignore[method-assign]
-            return handle
-
-        with unittest.mock.patch.object(io, "open", counting_open):
+        with _ByteCounter(path) as counter:
             rows = closed_loop.list_records(limit=10)
         assert len(rows) == 10
-        assert 0 < counted["bytes"] < size / 2, (
-            f"list_records(10) read {counted['bytes']} of {size} bytes"
+        assert counter.bytes_read > 0, "the counter did not observe the read"
+        assert counter.bytes_read < size / 2, (
+            f"list_records(10) read {counter.bytes_read} of {size} bytes"
         )
 
     def test_read_without_a_limit_still_returns_everything(self, tmp_path, monkeypatch):
