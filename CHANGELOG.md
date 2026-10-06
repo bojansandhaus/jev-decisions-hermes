@@ -4,6 +4,24 @@ All notable changes to Jev Decisions are recorded here and in more detail under 
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses semantic versioning.
 
+## [0.9.0] - 2026-10-05
+
+Bounded store reads, a cached `metrics()`, an observation comparator that reads error signals instead of substrings, and a supervision schema that no longer forbids what its own handler accepts. Full notes: [docs/releases/0.9.0.md](docs/releases/0.9.0.md).
+
+### Fixed
+
+- **`verify_observation` reported ordinary infrastructure states as unavailable.** It tested the lowercased text for `collector_error:`, `error`, and `timeout` as substrings, so a dict result such as `{"state": "errored"}` matched `error` and was reported `unavailable`. This ran on every hooked tool result, so a `status: unavailable` misreport wrote `awaiting_verification` into the closed loop for an observation the host had in fact verified. `errored`, `error_free`, `no_error`, and `timeout_reached` all now compare as the states they are. A collector failure prefix still reports `unavailable`, a dict carrying an `error`, `errors`, `timeout`, or `timed_out` key still reports it, and a bare string result keeps its documented text contract.
+- **The `jev_supervision` schema forbade six fields its own handler accepted.** `configure` accepted seven settable fields, but `JEV_SUPERVISION_SCHEMA` declared `additionalProperties: False` without six of them, so through the tool boundary only `mode` could be changed. `enabled`, `admission_enabled`, `relevance_threshold`, `challenge_confidence`, `max_provider_calls_per_turn`, and `repeated_failure_replan_at` are now declared with the types the handler already accepted, so runtime behaviour is unchanged and only the boundary stops rejecting valid input. Both sides now read one `JEV_SUPERVISION_SETTABLE` tuple, and a test asserts the two cannot drift again.
+- **`closed_loop.assess()` decoded the whole store on every call.** It called `_read()` with no limit and then ran `json.loads` on every row, to answer a question about one decision. It now walks the store in blocks and parses only lines naming that decision. On a 6.2 MB, 60,120-row store, 149 ms to 19 ms with identical output. Unlike `list_records`, it is not given a bounded tail, because a decision recorded before the window is a decision that exists and a tail read would report `found: False` for it. A decision ID that a writer escaped is still found: an empty prefiltered result falls back to the exact whole-store scan.
+- **Two bare sibling imports broke package mode.** `closed_loop.py` and `approval_review.py` each imported a sibling above the `try` block every sibling module uses, so a host loading the directory as a package got `ModuleNotFoundError: No module named 'ledger'` and `No module named 'approval_policy'`. Both are now inside the `try`.
+
+### Changed
+
+- Bounded store reads. `ledger.read(limit)` read the whole file and sliced the result, so `read(10)` cost 96% of `read(5000)`; `closed_loop._read()` had no limit at all. Both now walk backwards from the end of the file. On a 52,500-row store `read(10)` went from 11.31 ms to 0.33 ms.
+- Cached `metrics()` on `(mtime_ns, size)`. It is a pure function of an append-only file, and both `digest()` and the gateway snapshot call it: 17.46 ms cold to 0.004 ms warm, values identical.
+- `closed_loop.list_records()` now reads only as far back as it returns.
+- `plugin.yaml` reported `0.8.0` while packaging read `0.9.0` from `pyproject.toml`, so the published manifest advertised the wrong version. Both now say `0.9.0`.
+
 ## [0.8.0] - 2026-10-04
 
 Implements the shared four mode provider contract and turns the local `laya` provider into a generic local decision model slot that any local System One decision model can occupy. Full notes: [docs/releases/0.8.0.md](docs/releases/0.8.0.md).
@@ -73,17 +91,3 @@ Notes: [docs/releases/0.2.0.md](docs/releases/0.2.0.md).
 ## [0.1.0]
 
 Notes: [docs/releases/0.1.0.md](docs/releases/0.1.0.md).
-
-## 0.9.0 - 2026-10-05
-
-- Bounded store reads. `ledger.read(limit)` read the whole file and sliced the
-  result, so `read(10)` cost 96% of `read(5000)`; `closed_loop._read()` had no
-  limit at all. Both now walk backwards from the end of the file. On a 52,500-row
-  store `read(10)` went from 11.31 ms to 0.33 ms.
-- Cached `metrics()` on `(mtime_ns, size)`. It is a pure function of an
-  append-only file, and both `digest()` and the gateway snapshot call it: 17.46 ms
-  cold to 0.004 ms warm, values identical.
-- `closed_loop.list_records()` now reads only as far back as it returns.
-- 40 new tests in `tests/test_store_read_bounds.py`, each asserting a mechanism
-  (bytes read off disk, or a store handle opened) rather than a wall-clock
-  threshold. Full detail in `RELEASE_NOTES_v0.9.0.md`.

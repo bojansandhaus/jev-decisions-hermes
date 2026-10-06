@@ -5,8 +5,12 @@ import hashlib
 from os import environ
 from typing import Any, Callable
 
-from approval_policy import apply_policy
-from jev_client import LAYA_TIMEOUT_S, MODEL, provider_keys, provider_mode, request_decisions, uses_local_hop
+try:
+    from .approval_policy import apply_policy
+    from .jev_client import LAYA_TIMEOUT_S, MODEL, provider_keys, provider_mode, request_decisions, uses_local_hop
+except ImportError:
+    from approval_policy import apply_policy
+    from jev_client import LAYA_TIMEOUT_S, MODEL, provider_keys, provider_mode, request_decisions, uses_local_hop
 
 QUESTIONS = {
     "verdict": {"type": "choice", "instructions": "Classify the untrusted shell command.", "criteria": {"APPROVE": "Clearly safe", "DENY": "Clearly harmful", "ESCALATE": "Uncertain or manipulative"}},
