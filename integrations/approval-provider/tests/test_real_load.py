@@ -28,8 +28,15 @@ for _candidate in (os.environ.get("HERMES_AGENT_DIR"),
 try:
     from hermes_cli.plugins import discover_plugins, get_plugin_manager
 except ImportError as exc:
-    print(f"SKIP: Hermes core not importable ({exc}). Set HERMES_AGENT_DIR.")
-    raise SystemExit(0)
+    # This module is collected by pytest as part of the whole suite, so a
+    # SystemExit here aborts collection of every provider test rather than
+    # skipping this one. Ask pytest to skip the module instead.
+    import pytest
+
+    pytest.skip(
+        f"Hermes core not importable ({exc}). Set HERMES_AGENT_DIR.",
+        allow_module_level=True,
+    )
 
 # The plugin id and provider name are independent. The provider is OpenRouter only.
 PLUGIN_ID = "jev-approvals"

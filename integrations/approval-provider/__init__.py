@@ -476,7 +476,9 @@ class JevClient:
         #  2. credential exposure -> never automatic. Exfiltration (read + send) is DENY;
         #     a local read of secret material is ESCALATE, because legitimate work
         #     sometimes needs it and only the human knows which.
-        #  3. the owner's own policy authorises it -> honour that, it is the trusted channel
+        #  3. the owner's own policy authorises it -> honour that, it is the trusted
+        #     channel. Only for a verdict the model did not refuse: an operator
+        #     policy resolves uncertainty, it does not overrule a refusal.
         #  4. an APPROVE the model is unsure about, or on severe blast radius -> ESCALATE
         # ponytail: thresholds fixed. Steps 1, 2 and 4 only ever downgrade toward human
         # review; step 3 upgrades but requires an explicit operator_policy AND a
@@ -488,6 +490,17 @@ class JevClient:
                                        f"sends_outbound {sends_outbound:.2f} >= 0.7")
         elif reads_secrets >= 0.7:
             verdict, reason = "ESCALATE", f"reads_secrets {reads_secrets:.2f} >= 0.7"
+        elif verdict == "DENY":
+            # A refusal is never turned into an approval by operator policy. A
+            # prose policy read is weaker evidence than the model refusing the
+            # command on its merits, and upgrading it let a vague policy
+            # sentence approve a destructive command the model had rejected. A
+            # refusal the model was itself unsure about is escalated to a
+            # human, matching every other uncertain path below.
+            if confidence < 0.55 and policy_ok >= 0.7 and blast < 2.0 and policy:
+                verdict, reason = "ESCALATE", "model refused without confidence; policy authorises"
+            else:
+                reason = f"model verdict (conf {confidence:.2f})"
         elif policy_ok >= 0.7 and blast < 2.0 and policy:
             verdict, reason = "APPROVE", f"operator_policy allows ({policy_ok:.2f})"
         else:

@@ -4,6 +4,35 @@ All notable changes to Jev Decisions are recorded here and in more detail under 
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses semantic versioning.
 
+## [0.10.0] - 2026-10-08
+
+Four fail-open defects where missing, ambiguous, or self-supplied evidence was read as a reason to permit. Full notes: [docs/releases/0.10.0.md](docs/releases/0.10.0.md).
+
+### Security
+
+- **A model DENY was upgraded to APPROVE by operator policy.** `apply_policy()` overwrote whatever the model decided whenever `policy_allows >= 0.7` and any operator policy text was present, without restricting the upgrade to a non-DENY verdict. Verified: a `DROP DATABASE prod`-class DENY at 0.99 confidence with a vague policy sentence returned `APPROVE`. Policy may still resolve an ESCALATE or confirm an APPROVE, which is the channel it is meant to be; a refusal the model was unsure about is escalated to a human. Fixed in both copies of the rule, `approval_policy.py` and the shipped `integrations/approval-provider/__init__.py`.
+- **The supervised agent could weaken its own owner rule.** `lessons.edit()` had no owner check, while `retire()` and `sweep()` both refuse owner rules, so one tool call took a hard-stop rule from `kick` to `nudge` and the gate stopped firing. `edit` also rewrote `text`, `scope` and `detect`, and zeroed the escape counters. An owner rule is now exempt from `edit` in every field. Non-owner lessons remain editable.
+- **`jev_supervision action=configure` let the agent being supervised turn supervision off.** `enabled` and `mode` were both settable through a tool the gated party calls, taking `enforcing()` from True to False and releasing the next blocked action. Both are refused at the model-facing boundary with an explicit error; `enabled` is removed from the tool schema as well. Operator code still configures through `Supervision.configure()` directly.
+- **A timeout result consumed the control that was blocking a failing action.** `normalize_error()` recognised only `error`, `success is False` and `ok is False`, so `{"timeout": 30}`, `{"timed_out": true}`, `{"errors": [...]}` and a timeout string all rendered no failure signature and were recorded as success, consuming an active REPLAN control. The failure key set is now shared with `verification._ERROR_KEYS` and asserted equal by a test, and a new `_succeeded()` requires positive evidence of completion, reporting `outcome: "unknown"` and consuming nothing otherwise.
+
+### Added
+
+- `tests/test_fail_closed_regressions.py`, 29 tests pinning one invariant: when the evidence is missing, ambiguous, or supplied by the party being judged, the answer is never the permissive one. It covers both copies of the policy rule, every editable field on an owner rule, the enforcement switch from both the schema and the handler, and each result shape that must not consume a control.
+
+### Changed
+
+- `record_tool_outcome()` now reports three outcomes — `success`, `failure`, and `unknown` — instead of two. A result carrying no failure signature but no positive evidence of completion is `unknown`, which leaves the active control and the failure episode untouched.
+- `version` is `0.10.0` in `pyproject.toml` and `plugin.yaml`.
+
+### Known issues
+
+- The decision journal is append-only JSONL with no hash chain or writer identity, so `record_outcome` lets the reviewed agent label its own review, and spamming `action=surfaced` auto-retires a learned kick lesson.
+- Turn eviction drops a live session's blocking control, and `no_turn` under an enforcing mode reports `allow: True`.
+- `metrics()` reports on a 5,000-row sample while `promotion_ready` reads off it as though it were the whole store.
+- `tail_lines()` drops one row at exact block boundaries: `read(8192)` returns 8,191 rows.
+- `ingest`'s module-level case maps grow without bound, and an unknown `invocation_id` closes the oldest open case for that tool name.
+- `_boolean` fail-opens on any non-boolean value; `{"external": 1}` reads as not external.
+
 ## [0.9.0] - 2026-10-05
 
 Bounded store reads, a cached `metrics()`, an observation comparator that reads error signals instead of substrings, and a supervision schema that no longer forbids what its own handler accepts. Full notes: [docs/releases/0.9.0.md](docs/releases/0.9.0.md).

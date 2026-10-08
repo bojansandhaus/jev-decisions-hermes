@@ -819,14 +819,17 @@ JEV_SUPERVISION_SCHEMA = {
             # The remaining fields are the settable ones. They were missing here
             # while the `configure` handler accepted all seven, and this schema
             # sets additionalProperties False, so a caller crossing the tool
-            # boundary could change `mode` and nothing else. `mode` was already
-            # listed because other actions read it. Each entry mirrors the type
-            # the handler already accepted, so runtime behaviour is unchanged
-            # and only the tool boundary stops rejecting valid input.
-            "enabled": {
-                "type": "boolean",
-                "description": "Turn supervision on or off for this process. Off suppresses every local control and hook.",
-            },
+            # boundary could change `mode` and nothing else. Each entry mirrors
+            # the type the handler already accepted, so runtime behaviour is
+            # unchanged and only the tool boundary stops rejecting valid input.
+            #
+            # `enabled` is deliberately absent. It decided whether supervision
+            # enforces at all, and `jev_supervision` is called by the agent
+            # being supervised, so accepting it here let the gated party switch
+            # its own gate off. The handler refuses it as well; leaving it out
+            # of the schema means this boundary rejects it first. `mode` stays
+            # because the read-only actions above take it, and the handler
+            # refuses it for `configure` specifically.
             "admission_enabled": {
                 "type": "boolean",
                 "description": "Classify each turn locally. Never blocks on its own.",
@@ -865,15 +868,25 @@ JEV_SUPERVISION_SCHEMA = {
 # both derived from it so a field can never be settable through one and refused
 # through the other again. `tests/test_supervision_integration.py` asserts the
 # two stay in step.
+#
+# `enabled` and `mode` are deliberately NOT here. They decide whether
+# supervision enforces at all, and `jev_supervision` is a tool the supervised
+# agent itself calls, so exposing them let the gated party disarm its own gate:
+# one call with `mode=shadow` and the next blocked action runs. Operator code
+# and the test suite still set them by calling `Supervision.configure()`
+# directly, where the caller is the process that owns the policy rather than
+# the agent it polices.
 JEV_SUPERVISION_SETTABLE = (
-    "enabled",
-    "mode",
     "admission_enabled",
     "relevance_threshold",
     "challenge_confidence",
     "max_provider_calls_per_turn",
     "repeated_failure_replan_at",
 )
+
+# What the agent is told when it tries to reach the enforcement switch anyway.
+# Silent filtering would look like success; an explicit refusal is auditable.
+JEV_SUPERVISION_ENFORCEMENT_FIELDS = ("enabled", "mode")
 
 
 def _supervision_turn_key(turn_id: str, session_id: str) -> str:
@@ -1008,6 +1021,12 @@ def jev_supervision_handler(args: dict[str, Any], **_: Any) -> str:
             )
             return json.dumps({"success": True, **result}, sort_keys=True, default=str)
         if action == "configure":
+            refused = sorted(set(args) & set(JEV_SUPERVISION_ENFORCEMENT_FIELDS))
+            if refused:
+                raise ValueError(
+                    "enforcement cannot be changed from the supervised tool "
+                    f"boundary ({', '.join(refused)} is operator-only)"
+                )
             changes = {key: value for key, value in args.items() if key in JEV_SUPERVISION_SETTABLE}
             if not changes:
                 raise ValueError("configure requires at least one settable field")

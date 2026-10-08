@@ -101,9 +101,9 @@ def test_challenge_round_trip_through_the_tool(plugin):
 
 def test_configure_returns_the_applied_config(plugin):
     result = json.loads(plugin.jev_supervision_handler({
-        "action": "configure", "mode": "correct_next", "relevance_threshold": 0.4,
+        "action": "configure", "relevance_threshold": 0.4,
     }))
-    assert result["config"]["mode"] == "correct_next"
+    assert result["success"] is True, result
     assert result["config"]["relevance_threshold"] == 0.4
 
 
@@ -160,8 +160,10 @@ def _settable_types(plugin) -> dict:
 
 
 def test_the_settable_set_is_the_documented_one(plugin):
+    # `enabled` and `mode` are absent on purpose: they decide whether
+    # supervision enforces, and this tool is called by the agent it gates.
     assert set(plugin.JEV_SUPERVISION_SETTABLE) == {
-        "enabled", "mode", "admission_enabled", "relevance_threshold",
+        "admission_enabled", "relevance_threshold",
         "challenge_confidence", "max_provider_calls_per_turn",
         "repeated_failure_replan_at",
     }
@@ -169,10 +171,12 @@ def test_the_settable_set_is_the_documented_one(plugin):
 
 def test_the_schema_types_match_what_the_handler_accepts(plugin):
     """A wrong declared type would now fail at the boundary instead of being
-    coerced by `configure`, so pin each type to the handler's own coercion."""
+    coerced by `configure`, so pin each type to the handler's own coercion.
+
+    `mode` is declared for the read-only actions and still appears here through
+    `JEV_SUPERVISION_SCHEMA`; it is not in `JEV_SUPERVISION_SETTABLE`, so it is
+    not in this table either."""
     assert _settable_types(plugin) == {
-        "enabled": "boolean",
-        "mode": "string",
         "admission_enabled": "boolean",
         "relevance_threshold": "number",
         "challenge_confidence": "number",
@@ -181,11 +185,18 @@ def test_the_schema_types_match_what_the_handler_accepts(plugin):
     }
 
 
+def test_the_enforcement_fields_are_not_declared_as_settable_inputs(plugin):
+    """`mode` stays in the schema because the read-only actions read it, but it
+    must not be settable, and `enabled` must not be an input at all."""
+    properties = plugin.JEV_SUPERVISION_SCHEMA["parameters"]["properties"]
+    assert "enabled" not in properties
+    assert "mode" in properties, "the read-only actions take mode"
+    assert "mode" not in set(plugin.JEV_SUPERVISION_SETTABLE)
+
+
 @pytest.mark.parametrize(
     "field,value,expected",
     [
-        ("enabled", False, False),
-        ("mode", "correct_next", "correct_next"),
         ("admission_enabled", False, False),
         ("relevance_threshold", 0.4, 0.4),
         ("challenge_confidence", 0.5, 0.5),
@@ -202,6 +213,44 @@ def test_each_settable_field_survives_the_tool_boundary(plugin, field, value, ex
     result = json.loads(plugin.jev_supervision_handler(args))
     assert result["success"] is True, result
     assert result["config"][field] == expected
+
+
+# The enforcement switch is the one thing the supervised agent must not reach.
+# `jev_supervision` is a tool the gated party calls, so before this was pinned an
+# agent could send `{"action": "configure", "mode": "shadow"}` and the next
+# blocked action ran. `enabled` is refused by the schema outright, because
+# nothing but `configure` ever took it; `mode` has to stay declared for the
+# read-only actions, so it is refused by the handler instead.
+@pytest.mark.parametrize("field,value", [("mode", "shadow"), ("enabled", False)])
+def test_the_enforcement_switch_is_not_reachable_from_the_tool(plugin, field, value):
+    args = {"action": "configure", field: value}
+    schema_reason = _schema_rejects(plugin.JEV_SUPERVISION_SCHEMA["parameters"], args)
+    result = json.loads(plugin.jev_supervision_handler(args))
+    # Whichever layer stops it, nothing is applied and the caller is told.
+    assert result.get("success") is not True, result
+    assert "error" in result, result
+    assert result.get("config", {}).get(field) != value, result
+    assert schema_reason is not None or "enforcement" in result["error"], result
+
+
+def test_the_enforcement_switch_still_works_for_the_operator(plugin):
+    """Operator code configures through the object, not the model-facing tool,
+    and the read-only status action reports the resulting mode."""
+    plugin._supervision.default_supervision().configure(mode="correct_next")
+    view = json.loads(plugin.jev_supervision_handler({"action": "status"}))
+    assert view["success"] is True
+    assert view["mode"] == "correct_next"
+
+
+def test_configure_refuses_a_bundled_enforcement_switch(plugin):
+    """The exact call an agent would make to un-gate itself, with a legitimate
+    field attached so the refusal cannot be dismissed as a stray argument."""
+    result = json.loads(plugin.jev_supervision_handler({
+        "action": "configure", "mode": "shadow", "relevance_threshold": 0.4,
+    }))
+    assert result.get("success") is not True, result
+    assert "error" in result, result
+    assert "enforcement" in result["error"], result
 
 
 def test_an_undeclared_property_is_still_refused_by_the_schema(plugin):

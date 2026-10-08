@@ -50,7 +50,20 @@ def apply_policy(answers: dict[str, Any], *, has_policy: bool) -> ApprovalDecisi
         return ApprovalDecision("DENY", "credential material would leave the host")
     if secret >= 0.7:
         return ApprovalDecision("ESCALATE", f"reads_secrets {secret:.2f} >= 0.7")
-    if policy >= 0.7 and has_policy and blast < 2.0:
+    if raw == "DENY":
+        # A refusal is never turned into an approval by operator policy. A
+        # prose policy read is weaker evidence than the model refusing the
+        # command on its merits, and upgrading it let a vague policy sentence
+        # approve a destructive command the model had rejected. A refusal the
+        # model was itself unsure about is escalated to a human, which is what
+        # every other uncertain path below does.
+        if confidence_value < 0.55 and policy >= 0.7 and has_policy and blast < 2.0:
+            return ApprovalDecision("ESCALATE", "model refused without confidence; policy authorises")
+        reason = "model verdict"
+    elif policy >= 0.7 and has_policy and blast < 2.0:
+        # An operator policy may resolve an ESCALATE or confirm an APPROVE,
+        # because the owner's own written policy is the trusted channel for
+        # "is this the kind of command we do here".
         raw = "APPROVE"
         reason = "trusted operator policy matched"
     else:
