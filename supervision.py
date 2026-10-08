@@ -58,6 +58,23 @@ except ImportError:  # Standalone package use.
 SUPERVISION_MODES = ("off", "shadow", "correct_next", "precommit")
 ADMISSIONS = ("OFF", "WATCH", "ON")
 ENFORCING_MODES = ("correct_next", "precommit")
+
+# The keys a dict result uses to report failure, where a key that is present
+# but empty is not a failure: the producer told us there is nothing to report.
+#
+# These are the same four keys, with the same rule, that `verification` uses to
+# read tool results for verification. The two modules had drifted apart once
+# already — `verification` knew `errors`, `timeout` and `timed_out`, and this
+# one did not, which is how a timeout came to be recorded as a success — so
+# `test_fail_closed_regressions.py` asserts the two sets stay equal. Keeping two
+# definitions that must agree is the residual risk; pulling them into one
+# module would trade it for an import between two independently useful layers.
+_FAILURE_KEYS = frozenset({"error", "errors", "timeout", "timed_out"})
+
+# How a collector reports its own failure, and the word a bare-string result
+# carries when a call did not come back in time.
+_COLLECTOR_PREFIX = "collector_error:"
+_TIMEOUT_RE = re.compile(r"\btimed?\s*out\b|\btimeout\b")
 BLOCKING_CONTROLS = ("REPLAN", "GATHER_EVIDENCE", "ESCALATE")
 
 EVENT_KINDS = (
@@ -163,23 +180,81 @@ def fingerprint_failure(action_fingerprint: str, status: Any, error: Any) -> str
     })
 
 
+def _succeeded(result: Any) -> bool:
+    """True only on positive evidence that a tool call completed.
+
+    This is deliberately narrower than "no failure signature was found". A
+    result can carry no failure signal because it succeeded, or because its
+    producer used a status shape this module does not read — a `timeout`
+    envelope, an unrecognised wrapper, a value that says only that work is
+    still `running`. Those are the cases where absence of evidence used to be
+    read as evidence of success, and a blocked action ran.
+
+    Three things count as positive, and only these:
+
+    - an explicit affirmative marker (`success`, `ok`, an affirming `status`);
+    - a result carrying no keys at all, which is the ordinary "the tool ran and
+      had nothing to report" shape;
+    - a bare string with content and no failure signal in it, whose whole
+      content is the result.
+
+    Everything else — a dict whose status cannot be read, a wrapper around a
+    value this module does not recognise — is reported as unknown and consumes
+    nothing.
+    """
+    if normalize_error(result):
+        return False
+    if result is None:
+        return False
+    if isinstance(result, dict):
+        if result.get("success") is True or result.get("ok") is True:
+            return True
+        if result.get("success") is False or result.get("ok") is False:
+            return False
+        if isinstance(result.get("status"), str):
+            return result["status"].strip().lower() in {
+                "ok", "success", "succeeded", "done", "completed"
+            }
+        return not result
+    if isinstance(result, str):
+        return bool(result.strip())
+    return True
+
+
 def normalize_error(result: Any) -> str:
     """Extract a short failure signature from a tool result, or an empty string.
 
     A result counts as a failure only on an explicit failure signal. An ordinary
     successful payload never fabricates a failure signature.
+
+    The key set and the "present but empty is not a failure" rule are shared
+    with `verification`, which reads tool results the same way. The two
+    implementations had drifted: `verification` knew `errors`, `timeout` and
+    `timed_out`, and this one did not, so a result reporting a timeout carried
+    no signature at all and was recorded as a success. That let a timeout
+    consume an active control and release the action the control was blocking.
     """
     text = ""
     if isinstance(result, dict):
-        if result.get("error"):
-            text = str(result.get("error"))
-        elif result.get("success") is False:
-            text = str(result.get("message") or "success=false")
-        elif result.get("ok") is False:
-            text = str(result.get("message") or "ok=false")
+        for key in _FAILURE_KEYS:
+            if key not in result:
+                continue
+            value = result[key]
+            if value is None or value is False:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            if isinstance(value, (list, tuple, dict, set)) and not value:
+                continue
+            text = str(value)[:400]
+            break
+        if not text and (result.get("success") is False or result.get("ok") is False):
+            text = str(result.get("message") or "reported not successful")
     elif isinstance(result, str):
         lowered = result.strip().lower()
-        if lowered.startswith("error") or "traceback (most recent call last)" in lowered:
+        if lowered.startswith(_COLLECTOR_PREFIX) or lowered.startswith("error") or "traceback (most recent call last)" in lowered:
+            text = result
+        elif _TIMEOUT_RE.search(lowered):
             text = result
     if not text:
         return ""
@@ -672,14 +747,26 @@ class Supervision:
             return {"recorded": False, "reason": "no_turn"}
         action_fp = fingerprint_action(tool_name, args)
         error = normalize_error(result)
+        confirmed = _succeeded(result)
         with self._lock:
-            if not error:
+            if not error and confirmed:
                 # A materially different successful action consumes an active control.
                 if turn.active_control is not None and turn.active_control.action_fingerprint == action_fp:
                     turn.active_control.consumed = True
                     self._metrics["controls_consumed"] += 1
                 turn.failure_episodes.pop(action_fp, None)
                 return {"recorded": True, "outcome": "success", "action_fingerprint": action_fp}
+
+            if not error and not confirmed:
+                # Neither a failure nor a confirmed success. This is the shape
+                # that used to be read as success, because "no error signature"
+                # was the test. A timeout envelope, an unrecognised status
+                # wrapper, or a result carrying no signal at all landed here,
+                # and every one of them consumed the control that was blocking
+                # a repeated failing action. Record it as unknown instead, and
+                # leave the control and the failure episode exactly as they
+                # were: the action is still unproven and still constrained.
+                return {"recorded": True, "outcome": "unknown", "action_fingerprint": action_fp}
 
             failure_fp = fingerprint_failure(action_fp, result, error)
             episode = turn.failure_episodes.get(action_fp)

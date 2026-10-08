@@ -612,11 +612,26 @@ class LessonStore:
         text: str | None = None,
         scope: str | None = None,
     ) -> dict[str, Any]:
-        """Correct a lesson by hand, keeping its record."""
+        """Correct a lesson by hand, keeping its record.
+
+        An owner rule is exempt, and exempt wholly rather than field by field.
+        `retire` and `sweep` both refuse owner rules, and the promise they keep
+        is that an owner rule is a hard stop from the moment it is made. An
+        `edit` that could lower `severity`, rewrite `text`, or zero the escape
+        count would reopen every door those two guards close, by the one caller
+        that holds the tool: the agent being gated. There is deliberately no
+        operator exception here either, because this method is the model-facing
+        boundary and an authority flag it can simply not pass is the only one
+        that cannot be forged.
+        """
         with self._lock, self._mutation():
             item = self.get(lesson_id)
             if item is None:
                 raise ValueError(f"unknown lesson: {lesson_id}")
+            if item.owner:
+                raise ValueError(
+                    "an owner rule is never weakened; make a new rule instead"
+                )
             if severity is not None:
                 item.severity = severity if severity in SEVERITIES else item.severity
             if escapes is not None:
