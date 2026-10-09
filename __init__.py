@@ -18,10 +18,10 @@ except ImportError:
     from runtime import get_secret, get_hermes_home
 
 try:
-    from .ledger import append as append_ledger, metrics as ledger_metrics, read as read_ledger
+    from .ledger import append as append_ledger, metrics as ledger_metrics, read as read_ledger, verify_chain as verify_ledger_chain
     from .gateway import decide as gateway_decide, verify as gateway_verify, snapshot as gateway_snapshot, classify_case as gateway_classify
 except ImportError:
-    from ledger import append as append_ledger, metrics as ledger_metrics, read as read_ledger
+    from ledger import append as append_ledger, metrics as ledger_metrics, read as read_ledger, verify_chain as verify_ledger_chain
     from gateway import decide as gateway_decide, verify as gateway_verify, snapshot as gateway_snapshot, classify_case as gateway_classify
 try:
     from .ingest import ingest_event, update_tool_result
@@ -368,7 +368,7 @@ JEV_LEDGER_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["record_review", "record_outcome", "add_commitment", "add_decision", "close", "list", "metrics"]},
+            "action": {"type": "string", "enum": ["record_review", "record_outcome", "add_commitment", "add_decision", "close", "list", "metrics", "verify_chain"]},
             "review_id": {"type": "string"},
             "correct": {"type": "boolean"},
             "text": {"type": "string"},
@@ -455,6 +455,12 @@ def jev_ledger_handler(args: dict[str, Any], **_: Any) -> str:
         return json.dumps({"success": True, "entries": read_ledger(200)})
     if action == "metrics":
         return json.dumps({"success": True, "metrics": ledger_metrics()})
+    if action == "verify_chain":
+        # An operator action, not an agent one: it reports whether the ledger is
+        # still the ledger that was written. `intact: false` names the record id
+        # where the walk stopped, so a break is findable by eye.
+        report = verify_ledger_chain()
+        return json.dumps({"success": True, "chain": report}, sort_keys=True, default=str)
     if action == "record_review":
         review_id = args.get("review_id") or append_ledger("review", {"workflow": args.get("status", "manual"), "details": args.get("details", {})})
         return json.dumps({"success": True, "review_id": review_id})
@@ -1105,7 +1111,15 @@ def _lesson_action_text(tool_name: str, args: Any, limit: int = 600) -> str:
 # A lesson guard that cannot reach a decision must therefore abstain, never vetoing
 # the tool. These counters keep such a failure visible instead of letting it look
 # like a quietly working guard.
-_LESSON_GATE_ERRORS: dict[str, Any] = {"count": 0, "last": ""}
+#
+# The counters are process-local, and the only way to read them was
+# `jev_lessons action=stats` — a tool the agent being gated calls, and the same
+# agent that can ignore what it says. A store unreadable for days was therefore
+# invisible to everyone but the party whose behaviour it constrains. The first
+# failure per process is now appended to the ledger, which an operator reads
+# regardless of what the agent does. Later failures bump the counter only:
+# appending per failure would let a broken store grow the ledger without bound.
+_LESSON_GATE_ERRORS: dict[str, Any] = {"count": 0, "last": "", "reported": False}
 
 
 def _lesson_gate(tool_name: str, args: Any, enforcing: bool) -> dict[str, Any] | None:
@@ -1115,6 +1129,26 @@ def _lesson_gate(tool_name: str, args: Any, enforcing: bool) -> dict[str, Any] |
     block the tool rather than pass it.
     """
     try:
+        return _lesson_gate_decision(tool_name, args, enforcing)
+    except Exception as exc:
+        _LESSON_GATE_ERRORS["count"] += 1
+        _LESSON_GATE_ERRORS["last"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+        if not _LESSON_GATE_ERRORS["reported"]:
+            _LESSON_GATE_ERRORS["reported"] = True
+            try:
+                append_ledger(
+                    "lesson_gate_error",
+                    {
+                        "error_type": type(exc).__name__,
+                        "detail": str(exc)[:200],
+                        "tool_name": str(tool_name)[:120],
+                    },
+                )
+            except Exception:
+                # Reporting the failure must never become the failure. The
+                # counter is incremented either way.
+                pass
+        return None
         return _lesson_gate_decision(tool_name, args, enforcing)
     except Exception as exc:
         _LESSON_GATE_ERRORS["count"] += 1

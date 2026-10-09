@@ -4,6 +4,23 @@ All notable changes to Jev Decisions are recorded here and in more detail under 
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses semantic versioning.
 
+## [0.11.0] - 2026-10-09
+
+The last two items from the 0.10.0 known-issues list. Full notes: [docs/releases/0.11.0.md](docs/releases/0.11.0.md).
+
+### Security
+
+- **The decision journal is now hash-chained.** It was append-only JSONL with no hash chain, so any process with write access to `$JEV_HOME/logs/` could drop a record from the middle or edit a `correct: true` in afterwards, silently. Each record now carries `prev_id` and a `chain_hash` covering the previous link as well as its own body — covering the previous link is what makes a rewritten row detectable, since an edited record keeps its id. Truncation and rewriting both report `chain_hash_mismatch` with the record id where the walk stopped. `verify_chain` is a new operator-only action on `jev_ledger`. The chain is additive and self-declaring: a pre-chain record links to nothing and is reported as an `unlinked_head`, so an existing ledger is not accused of tampering on first run. This makes tampering **detectable**; it does not stop anybody who can write the file from writing it, and the notes say so.
+
+### Fixed
+
+- **A lesson-guard failure now reaches the operator.** `_lesson_gate` keeps every failure in process-local counters, and the only way to read them was `jev_lessons action=stats` — a tool the agent being gated calls, and the same agent that can ignore it. A store unreadable for days was invisible to everyone but the party whose behaviour it constrains. The first failure per process is now appended as `lesson_gate_error`; later ones bump the counter only, because appending per failure would let a broken store grow the ledger without bound. The append is wrapped, so if the ledger is what is broken the gate still abstains and still returns.
+
+### Changed
+
+- `jev_ledger` gains the `verify_chain` action; `docs/reference.md` documents it.
+- `version` is `0.11.0` in `pyproject.toml` and `plugin.yaml`.
+
 ## [0.10.5] - 2026-10-09
 
 Closes the six known issues 0.10.0 named, and leaves four still open. Each was a bound, a sample, or a fallback that silently chose the permissive reading. Full notes: [docs/releases/0.10.5.md](docs/releases/0.10.5.md).
