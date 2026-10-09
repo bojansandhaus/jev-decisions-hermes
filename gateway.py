@@ -11,6 +11,19 @@ except ImportError:
 
 
 def decide(state: dict[str, Any]) -> dict[str, Any]:
+    malformed = _malformed_flags(state)
+    if malformed:
+        # Refuse rather than coerce. Every one of these flags defaults toward
+        # "no human needed", so a state that asserts external access with the
+        # integer 1, or an irreversible action with the string "no", would have
+        # been read as the safe case and classified `observe`. Reporting the
+        # state as unreadable keeps the decision out of the model's hands
+        # entirely instead of granting it from a default.
+        return {
+            "decision": "invalid_state",
+            "authority": "invalid_state",
+            "reason": {"malformed_flags": malformed},
+        }
     reversible = _boolean(state, "reversible", True)
     external = _boolean(state, "external", False)
     destructive = _boolean(state, "destructive", False) or str(state.get("action", "")).lower().startswith(("delete", "destroy", "wipe"))
@@ -31,7 +44,6 @@ def decide(state: dict[str, Any]) -> dict[str, Any]:
             "reversible": reversible,
         },
     }
-
 
 def verify(state: dict[str, Any]) -> dict[str, Any]:
     """Require explicit boolean proof for a changed external target.
@@ -85,14 +97,56 @@ def classify_case(domain: str, state: dict[str, Any]) -> dict[str, Any]:
     return {"domain": domain, "decision": "review", "next": "jev_workflow"}
 
 
+# The policy flags `decide` reads, and the reading each takes when the state
+# says nothing about it. These are the defaults for absence, never for a flag
+# that is present and unreadable.
+_POLICY_FLAGS = {
+    "reversible": True,
+    "external": False,
+    "destructive": False,
+    "credential": False,
+}
+
+
+def _malformed_flags(state: Any) -> list[str]:
+    """The policy flags present in `state` but not actual JSON booleans.
+
+    A flag that is present and is not a boolean is a malformed state, not a
+    value to coerce toward the default. Coercing picked the default in the same
+    permissive direction every time: `{"external": 1}` said the action reached
+    the network and was read as `external=False`, which classified it `observe`
+    with no human in the loop, and `{"reversible": "no"}` said irreversible and
+    was read `True`. Absence is different and stays a default, because a state
+    that says nothing is the caller's to define, not this function's to police.
+    """
+    if not isinstance(state, dict):
+        return []
+    return sorted(
+        key
+        for key in _POLICY_FLAGS
+        if key in state and not isinstance(state[key], bool)
+    )
+
+
 def _boolean(state: dict[str, Any], key: str, default: bool) -> bool:
-    """Accept policy booleans only as actual JSON booleans."""
+    """Accept policy booleans only as actual JSON booleans.
+
+    Only ever reached once `_malformed_flags` has cleared the state, so the
+    non-boolean branch below is the defensive case rather than the mechanism.
+    """
     value = state.get(key, default)
     return value if isinstance(value, bool) else default
 
 
-def record_outcome(review_id: str, correct: bool, details: dict[str, Any] | None = None) -> str:
-    return append_ledger("outcome", {"review_id": review_id, "correct": bool(correct), "details": details or {}})
+def record_outcome(review_id: str, correct: bool, details: dict[str, Any] | None = None, labeler: str = "user") -> str:
+    """Append an outcome row, recording who claimed it.
+
+    `labeler` is set by the code path, never by the caller's arguments. An
+    outcome row with no labeler was indistinguishable from one the operator had
+    confirmed, so `metrics()` counted a self-certified `correct: true` the same
+    as a human check and the shadow report promoted on the result.
+    """
+    return append_ledger("outcome", {"review_id": review_id, "correct": bool(correct), "details": details or {}, "labeler": labeler})
 
 
 def record_commitment(text: str, owner: str | None = None, deadline: str | None = None) -> str:

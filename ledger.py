@@ -76,11 +76,19 @@ def tail_lines(path: pathlib.Path, limit: int) -> list[str]:
             block = handle.read(step)
             blocks.append(block)
             newlines += block.count(b"\n")
-    data = b"".join(reversed(blocks)).decode("utf-8", errors="ignore")
-    lines = data.splitlines()
-    if position > 0 and lines:
-        lines = lines[1:]
-    return lines[-limit:]
+        data = b"".join(reversed(blocks)).decode("utf-8", errors="ignore")
+        lines = data.splitlines()
+        if position > 0 and lines:
+            # The first line is a fragment only when the read began in the
+            # middle of a record. Asking the byte one before the start is
+            # exact; assuming it was always a fragment dropped a real row
+            # every time a block boundary landed on a line boundary, which it
+            # does whenever `limit` rows happen to fill a whole number of
+            # blocks. `read(8192)` returned 8,191 rows on such a file.
+            handle.seek(position - 1)
+            if handle.read(1) != b"\n":
+                lines = lines[1:]
+        return lines[-limit:]
 
 
 def read(limit: int = 200) -> list[dict[str, Any]]:
@@ -98,15 +106,23 @@ def read(limit: int = 200) -> list[dict[str, Any]]:
     return rows
 
 
-# `metrics()` is a pure function of the store's contents, and every snapshot pays
-# for it: `digest()` calls both `queue()` and `metrics()`, and the gateway's
+# `metrics()` is a pure function of *the window it reads*, and every snapshot
+# pays for it: `digest()` calls both `queue()` and `metrics()`, and the gateway's
 # `snapshot()` calls `metrics()` too. Since the store is append-only, (mtime_ns,
 # size) identifies its contents exactly, so a repeated snapshot costs one stat
 # instead of a full re-read and re-parse.
 #
 # Any append bumps mtime, so the cache cannot go stale. The entry is also dropped
 # explicitly on failure so an unreadable file is never served from cache.
+#
+# The window is `METRICS_WINDOW` rows from the tail, not the whole store, so the
+# counts below are window-scoped whenever the store is taller than that. They
+# were reported as totals. `sampled` and `window_rows` say so, and the comment
+# that used to call this "a pure function of the store's contents" was the error
+# that let the undercount reach an operator's screen unchallenged: on a store of
+# 8,000 rows this reported `reviews: 3500` where 5,000 were recorded.
 _METRICS_CACHE: tuple[int, int, dict[str, Any]] | None = None
+METRICS_WINDOW = 5000
 
 
 def _invalidate_metrics() -> None:
@@ -130,7 +146,7 @@ def metrics() -> dict[str, Any]:
     if fingerprint is not None and _METRICS_CACHE is not None:
         if _METRICS_CACHE[:2] == fingerprint:
             return _METRICS_CACHE[2]
-    rows = read(5000)
+    rows = read(METRICS_WINDOW)
     reviews = {row.get("review_id"): row for row in rows if row.get("kind") == "review" and row.get("review_id")}
     outcomes = [row for row in rows if row.get("kind") == "outcome"]
     by_review = {row.get("review_id"): row for row in outcomes if row.get("review_id")}
@@ -144,6 +160,14 @@ def metrics() -> dict[str, Any]:
         "incorrect": sum(1 for row in outcomes if row.get("correct") is False),
         "accuracy": round(correct / len(outcomes), 4) if outcomes else None,
         "kinds": sorted({str(row.get("kind")) for row in rows}),
+        # A review is appended before its own outcome, so every review inside a
+        # window carries its outcome inside the same window. `reviews` is
+        # therefore only ever short of the *earlier* rows that scrolled out,
+        # never short of a pairing, and `unlabeled_reviews` stays meaningful.
+        # What the window cannot tell you is how much scrolled out, so the two
+        # fields below are the honest form of "totals".
+        "window_rows": len(rows),
+        "sampled": len(rows) >= METRICS_WINDOW,
     }
     if fingerprint is not None:
         _METRICS_CACHE = (fingerprint[0], fingerprint[1], result)

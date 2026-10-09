@@ -52,9 +52,40 @@ def test_domain_classification_is_conservative() -> None:
     assert gateway.classify_case("communication", {"creates_commitment": True})["next"] == "record_commitment"
 
 
-def test_policy_does_not_treat_string_booleans_as_authority() -> None:
-    assert gateway.decide({"external": "false", "reversible": "false"})["decision"] == "observe"
-    assert gateway.classify_case("communication", {"creates_commitment": "false"})["next"] == "communication_review"
+def test_a_flag_that_is_present_but_unreadable_is_refused_not_coerced() -> None:
+    """A policy flag that is present and is not a boolean is a malformed state.
+
+    This test previously asserted `{"external": "false", "reversible":
+    "false"}` -> `observe`, which pinned the permissive default in place of a
+    refusal, and passed only because that value happened to be conservative.
+    Every one of these flags defaults toward "no human needed", so
+    `{"external": 1}` — an action that reaches the network — read as
+    `external=False` and was classified `observe` with no human in the loop, and
+    `{"reversible": "no"}` read as reversible. Absence still falls back to the
+    default; presence does not.
+    """
+    for malformed in (
+        {"external": 1},
+        {"credential": "yes"},
+        {"reversible": 0},
+        {"reversible": "no"},
+        {"external": "false", "reversible": "false"},
+    ):
+        decision = gateway.decide(malformed)
+        assert decision["decision"] == "invalid_state", malformed
+        assert decision["authority"] == "invalid_state", malformed
+        assert decision["reason"]["malformed_flags"], malformed
+
+
+def test_absence_still_uses_the_default_and_real_booleans_still_route() -> None:
+    """The refusal must not become an anything-goes gate. A state that says
+    nothing still gets the documented default, and a real boolean still routes."""
+    assert gateway.decide({})["decision"] == "observe"
+    assert gateway.decide({"external": True})["decision"] == "suggest"
+    assert gateway.decide({"external": True, "reversible": False})["decision"] == "human"
+    assert gateway.decide({"credential": True})["decision"] == "human"
+    assert gateway.classify_case("communication", {})["next"] == "communication_review"
+    assert gateway.classify_case("communication", {"creates_commitment": True})["next"] == "record_commitment"
 
 
 def test_observation_verification_requires_expected_state() -> None:

@@ -301,6 +301,14 @@ class SupervisionConfig:
     repeated_failure_replan_at: int = 3
     retain_recent_events: int = 64
     max_tracked_turns: int = 16
+    # How far past `max_tracked_turns` the map may grow while every tracked turn
+    # still holds a blocking control. A `ControlDirective` carries no expiry and
+    # a turn is only freed by `end_turn`, so without this the refusal to evict a
+    # control-holding turn would be a leak in a process where turns never end.
+    # This is the hard ceiling at which the memory bound wins over the control,
+    # and the loss is recorded rather than dropped in silence. See
+    # `_evict_oldest_turn`.
+    control_retention_limit: int = 256
 
     @classmethod
     def from_env(cls) -> "SupervisionConfig":
@@ -314,6 +322,7 @@ class SupervisionConfig:
             max_provider_calls_per_turn=_env_int("JEV_SUPERVISION_MAX_CALLS", 96, 1, 1000),
             repeated_failure_replan_at=_env_int("JEV_SUPERVISION_REPLAN_AT", 3, 2, 20),
             retain_recent_events=_env_int("JEV_SUPERVISION_RETAIN", 64, 8, 512),
+            control_retention_limit=_env_int("JEV_SUPERVISION_CONTROL_RETENTION", 256, 1, 10000),
         )
 
 
@@ -490,11 +499,8 @@ class Supervision:
                 if session_id:
                     self._session_turn[session_id] = turn_id
                 if len(self._turns) > self._config.max_tracked_turns:
-                    oldest = next(iter(self._turns))
-                    dropped = self._turns.pop(oldest)
-                    if dropped.session_id:
-                        self._session_turn.pop(dropped.session_id, None)
-                    self._metrics["turns_evicted"] += 1
+                    self._evict_oldest_turn(protected=turn_id)
+
             if self._config.admission_enabled and turn.admission == "PENDING":
                 admission, score, reasons = classify_admission(user_message)
                 turn.admission = admission
@@ -508,6 +514,70 @@ class Supervision:
                 "reasons": list(turn.admission_reasons),
                 "mode": self._config.mode,
             }
+
+    def _evict_oldest_turn(self, protected: str = "") -> None:
+        """Drop the oldest turn, unless that turn is holding a control.
+
+        Eviction used to take `next(iter(self._turns))` whatever it held, and
+        the consequences were two. A turn that was still live lost its active
+        control, and `check_control` then reported `allow: True` for the exact
+        action that control was blocking, because a turn that cannot be resolved
+        is indistinguishable from a turn with nothing to enforce. In `precommit`
+        that is a fail-open of the one thing enforcement does, reachable by
+        ordinary unrelated traffic.
+
+        A blocking control is therefore never evicted. The oldest turn *without*
+        one is dropped instead, and if every tracked turn holds a control the
+        map grows past `max_tracked_turns` for as long as that stays true. That
+        is deliberate: the bound exists to cap memory, and what it would
+        otherwise cap is a safety decision. Controls are consumed or expire, so
+        the overshoot is temporary, and it is counted so it cannot be silent.
+
+        `protected` is the turn being started right now. Without it the newest
+        turn is the first control-free one in insertion order, so it would be
+        the victim every time, and no turn created after the cap was reached
+        could ever accumulate a control at all.
+        """
+        victim = None
+        for turn_id, candidate in self._turns.items():
+            if turn_id == protected:
+                continue
+            if candidate.active_control is None or candidate.active_control.consumed:
+                victim = turn_id
+                break
+        if victim is not None:
+            self._drop_turn(victim)
+            return
+
+        # Every remaining turn holds a control. Hold the line up to the hard
+        # ceiling: the bound exists to cap memory, and what it would otherwise
+        # drop is a safety decision.
+        if len(self._turns) <= self._config.control_retention_limit:
+            self._metrics["turns_retained_past_cap"] += 1
+            return
+
+        # Past the ceiling the memory bound has to win, but the loss is no
+        # longer silent: it is counted under its own metric and appended to the
+        # ledger, so an operator can see that a blocking control was dropped
+        # and why. The alternative was a process that never frees a turn.
+        oldest = next(iter(self._turns))
+        self._metrics["controls_evicted"] += 1
+        append_ledger(
+            "supervision",
+            {
+                "action": "control_evicted",
+                "turn_id": oldest,
+                "reason": "control_retention_limit",
+                "retention_limit": self._config.control_retention_limit,
+            },
+        )
+        self._drop_turn(oldest)
+
+    def _drop_turn(self, turn_id: str) -> None:
+        dropped = self._turns.pop(turn_id)
+        if dropped.session_id:
+            self._session_turn.pop(dropped.session_id, None)
+        self._metrics["turns_evicted"] += 1
 
     def end_turn(self, *, turn_id: str = "", session_id: str = "") -> dict[str, Any]:
         turn = self._resolve_turn(turn_id, session_id)
@@ -850,7 +920,12 @@ class Supervision:
         """
         turn = self._resolve_turn(turn_id, session_id)
         if turn is None:
-            return {"controlled": False, "allow": True, "mode": self._config.mode}
+            return {
+                "controlled": False,
+                "allow": True,
+                "mode": self._config.mode,
+                "reason": "no_turn",
+            }
         with self._lock:
             control = turn.active_control
             if control is None or control.consumed:
