@@ -56,9 +56,18 @@ def calibration_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 def closed_loop_calibration(rows: list[dict[str, Any]]) -> dict[str, Any]:
     labels = [row for row in rows if row.get("kind") == "outcome_label" and isinstance(row.get("success"), bool)]
-    correct = sum(1 for row in labels if row.get("success") is True)
+    # A label the supervised agent wrote about itself is reported, but it is not
+    # counted toward the numbers this function recommends on. Before labels
+    # carried a `labeler` at all, a self-certified `correct: true` was
+    # indistinguishable from an operator's confirmation, so the accuracy here
+    # could be written by the party it grades.
+    operator_labels = [
+        row for row in labels if row.get("labeler") != "agent"
+    ]
+    agent_labels = [row for row in labels if row.get("labeler") == "agent"]
+    correct = sum(1 for row in operator_labels if row.get("success") is True)
     by_decision: dict[str, list[dict[str, Any]]] = {}
-    for row in labels:
+    for row in operator_labels:
         by_decision.setdefault(str(row.get("decision_id", "unknown")), []).append(row)
     weak = []
     for decision_id, items in by_decision.items():
@@ -70,10 +79,10 @@ def closed_loop_calibration(rows: list[dict[str, Any]]) -> dict[str, Any]:
     if weak:
         recommendation = f"review_workflow:{weak[0][1]}"
     return {
-        "labeled": len(labels),
+        "labeled": len(operator_labels),
         "correct": correct,
-        "incorrect": len(labels) - correct,
-        "accuracy": round(correct / len(labels), 4) if labels else None,
+        "incorrect": len(operator_labels) - correct,
+        "accuracy": round(correct / len(operator_labels), 4) if operator_labels else None,
         "decisions_with_labels": len(by_decision),
         "weak_decisions": [decision_id for _, decision_id in weak],
         "promotion_ready": len(labels) >= 100 and correct / len(labels) >= 0.95 if labels else False,

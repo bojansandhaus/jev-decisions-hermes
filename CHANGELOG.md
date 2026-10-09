@@ -4,6 +4,38 @@ All notable changes to Jev Decisions are recorded here and in more detail under 
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses semantic versioning.
 
+## [0.10.5] - 2026-10-09
+
+Closes the six known issues 0.10.0 named, and leaves four still open. Each was a bound, a sample, or a fallback that silently chose the permissive reading. Full notes: [docs/releases/0.10.5.md](docs/releases/0.10.5.md).
+
+### Security
+
+- **The decision journal was forgeable by the party it judges.** `record_outcome` wrote no record of who claimed the outcome, and `label_outcome` read the labeler out of the tool arguments, so the supervised agent could label its own review `correct: true` and sign the label as the operator's. `labeler` is now set by the code path and never by the caller: tool-supplied labels are signed `agent`, operator calls keep `user`. `closed_loop.record_outcome` and `gateway.record_outcome` record it, where neither did before. `shadow_report` reports agent labels beside the operator figure instead of folding them in, so a shadow report can no longer grade itself on its own labels.
+- **Turn eviction dropped a live blocking control.** `begin_turn` evicted `next(iter(self._turns))` whatever it held, losing the control of a turn that was still live, after which `check_control` reported `allow: True` for the exact action it was blocking. A blocking control is now never evicted; the oldest turn *without* one is dropped instead, and the turn being started is excluded from candidates. If every tracked turn holds a control the map grows past `max_tracked_turns` up to `control_retention_limit` (default 256), because a `ControlDirective` carries no expiry — past that ceiling the memory bound wins and the drop is counted as `controls_evicted` and appended to the ledger. `no_turn` now names itself.
+
+### Fixed
+
+- **`metrics()` reported a 5,000-row sample as totals.** It is a pure function of the last `METRICS_WINDOW` rows, and on an 8,000-row store it reported `reviews: 3500` where 5,000 were recorded. `sampled` and `window_rows` now say so. The counts and the cache are unchanged; the false comment claiming it was a function of the whole store is corrected.
+- **`tail_lines()` dropped one row at exact block boundaries.** The read dropped its leading line on the assumption it was a fragment, so `read(8192)` returned 8,191 rows whenever `limit` rows filled a whole number of 64 KB blocks. It now asks the byte before the read whether it is a newline. Exact across every limit from 1 to 9,000, and a genuine mid-record start still loses its partial first line.
+- **`ingest` leaked a slot per unverified result and closed the wrong case.** Cleanup ran only on `verified`, and a result with no `expected` field verifies False — the ordinary case — so every hooked tool result leaked a dict entry and a case row for the life of the process. Every outcome now frees its slot. An `invocation_id` that is present but unknown returned the wrong case via `pending[0]`; it now returns `None`. Both maps are bounded at 512.
+- **`_boolean` fail-opened on any non-boolean value.** Every policy flag defaults toward "no human needed", so `{"external": 1}` — an action reaching the network — read as `external=False` and was classified `observe`. A flag present but not a boolean now returns `{"decision": "invalid_state", "authority": "invalid_state"}`. Absence still uses the default and real booleans still route. The test that pinned the coercion is rewritten to pin the refusal, with the reason recorded.
+
+### Added
+
+- `tests/test_known_issues_regressions.py`, 26 tests pinning the six closures: labeler provenance and the tool-boundary forgery attempt, control survival across eviction with the cap and ceiling both engaged, the declared sampling window, `tail_lines` exactness at and around the block boundary, slot release on every outcome plus the unknown-invocation and bounded-map cases, and the refused malformed flag beside its absence and boolean counterparts.
+
+### Changed
+
+- `SupervisionConfig` gains `control_retention_limit` (default 256, env `JEV_SUPERVISION_CONTROL_RETENTION`) — the hard ceiling above which a blocking control may be dropped, counted and logged.
+- `record_tool_outcome()` and `closed_loop_calibration()` keep their existing outputs and add the provenance the callers need; no field was removed.
+- `version` is `0.10.5` in `pyproject.toml` and `plugin.yaml`.
+
+### Known issues
+
+- The ledger has no hash chain: truncation is undetectable and an external writer can append. Detecting it changes the on-disk format and belongs in a major release.
+- `metrics()` still reports a window rather than the whole store; making it complete would defeat the cache. It is now declared.
+- `_boolean`'s new `invalid_state` is a new value in the deterministic-policy surface; callers switching on `decision` without a default will need one. Nothing in this repo does.
+
 ## [0.10.0] - 2026-10-08
 
 Four fail-open defects where missing, ambiguous, or self-supplied evidence was read as a reason to permit. Full notes: [docs/releases/0.10.0.md](docs/releases/0.10.0.md).

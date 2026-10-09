@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jev-decisions"
-version = "0.10.0"
+version = "0.10.5"
 description = "Safety checks that help Hermes and other AI agents decide when to act, ask, or verify"
 readme = "README.md"
 requires-python = ">=3.10"

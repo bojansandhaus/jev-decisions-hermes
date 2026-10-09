@@ -105,13 +105,23 @@ def record_observation(decision_id: str, observation: str, source: str, supports
     return {"observation_id": observation_id, "decision_id": decision_id, "kind": "observation"}
 
 
-def record_outcome(decision_id: str, status: str, success: bool | None, evidence: Any = None, notes: str = "") -> dict[str, Any]:
+def record_outcome(decision_id: str, status: str, success: bool | None, evidence: Any = None, notes: str = "", labeler: str = "user") -> dict[str, Any]:
+    """Append an outcome row.
+
+    `labeler` is set by the code path, never by the caller's arguments. It used
+    to be absent altogether, so an outcome row carried no record of who claimed
+    it, and the one path that did record it read the name straight out of the
+    tool arguments — which let the party being judged label its own review
+    `correct: true` and sign itself `labeler: "user"` while doing both
+    invisibly.
+    """
     outcome_id = _append("outcome", {
         "decision_id": decision_id,
         "status": status[:500],
         "success": success if isinstance(success, bool) else None,
         "evidence": evidence,
         "notes": notes[:4000],
+        "labeler": labeler,
     })
     return {"outcome_id": outcome_id, "decision_id": decision_id, "kind": "outcome"}
 

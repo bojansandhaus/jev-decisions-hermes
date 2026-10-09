@@ -461,7 +461,7 @@ def jev_ledger_handler(args: dict[str, Any], **_: Any) -> str:
     if action == "record_outcome":
         if not isinstance(args.get("review_id"), str) or not isinstance(args.get("correct"), bool):
             return json.dumps({"error": "record_outcome requires review_id and correct"})
-        entry_id = append_ledger("outcome", {"review_id": args["review_id"], "correct": args["correct"], "details": args.get("details", {})})
+        entry_id = append_ledger("outcome", {"review_id": args["review_id"], "correct": args["correct"], "details": args.get("details", {}), "labeler": AGENT_LABELER})
         return json.dumps({"success": True, "entry_id": entry_id})
     if action in {"add_commitment", "add_decision"}:
         if not isinstance(args.get("text"), str) or not args["text"].strip():
@@ -766,7 +766,11 @@ def jev_loop_handler(args: dict[str, Any], **_: Any) -> str:
         elif action == "label_outcome":
             if not isinstance(args.get("success"), bool):
                 raise ValueError("label_outcome requires boolean success")
-            result = loop_label_outcome(args["decision_id"], args["success"], args.get("evidence"), args.get("labeler", "user"), args.get("notes", ""))
+            # The labeler is fixed by this boundary, not read from `args`. It
+            # used to be `args.get("labeler", "user")`, so the party being
+            # judged could sign its own label as the operator's, and the
+            # shadow report read that signature as the operator's.
+            result = loop_label_outcome(args["decision_id"], args["success"], args.get("evidence"), AGENT_LABELER, args.get("notes", ""))
         elif action == "reopen":
             result = loop_reopen(args["decision_id"], args.get("reason", "new contradictory evidence"), args.get("evidence"))
         elif action == "assess":
@@ -887,6 +891,14 @@ JEV_SUPERVISION_SETTABLE = (
 # What the agent is told when it tries to reach the enforcement switch anyway.
 # Silent filtering would look like success; an explicit refusal is auditable.
 JEV_SUPERVISION_ENFORCEMENT_FIELDS = ("enabled", "mode")
+
+# Who claimed an outcome row. Operator code that calls `record_outcome` or
+# `label_outcome` directly leaves the default of "user"; every label that
+# arrives through a registered tool is signed AGENT_LABELER instead, because a
+# registered tool is one the model calls. `shadow_report` treats agent labels as
+# advisory rather than as the operator's judgement, which is the property this
+# constant exists to make checkable.
+AGENT_LABELER = "agent"
 
 
 def _supervision_turn_key(turn_id: str, session_id: str) -> str:
