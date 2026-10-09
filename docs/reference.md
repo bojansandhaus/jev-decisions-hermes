@@ -91,6 +91,7 @@ Use JSON booleans, never strings such as `"false"`. The policy falls back to its
 - `close`: append a closure against a `review_id`. This preserves the earlier entry.
 - `list`: return the latest 200 entries.
 - `metrics`: summarize recorded reviews, outcomes, labels, and record kinds. These figures describe supplied labels, not an independent benchmark of model quality.
+- `verify_chain`: walk the ledger and report whether its hash chain still holds. `intact: false` names the record id where the walk stopped. Every record carries the id and content hash of the one before it, so removing or rewriting a record breaks the chain from that point onward. Records written before the chain linked to nothing and are reported as an unlinked head rather than as a break, so a ledger that predates the feature is not accused of tampering. This is an operator check: it makes truncation and rewriting detectable, and it does not stop anybody who can write the file from writing it.
 
 ### Decision journal: `jev_loop`
 
